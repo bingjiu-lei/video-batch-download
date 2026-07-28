@@ -50,7 +50,7 @@
 
 - 平台相关逻辑放在 `scripts/platforms/<platform>.js`；复杂插件也可放在 `scripts/platforms/<id>/index.js` 并在同目录拆分私有模块。
 - URL 匹配规则由插件自己的 `static matchesUrl()` 维护；不要在核心路由中增加平台分支。
-- `scripts/platforms/router.js` 只负责发现、契约校验、禁用、故障隔离和通用路由，不维护静态平台清单。
+- `scripts/platforms/router.js` 只负责发现、契约校验、禁用、故障隔离、通用路由和 `matched` / `unmatched` 诊断报告，不维护静态平台清单。
 - 通用下载、合并、转写、断点续传和输出逻辑分别放在 `scripts/media/`、`scripts/transcription/`、`scripts/core/`、`scripts/output/`，批次状态机放在 `scripts/pipeline/`。
 - `scripts/download.mjs` 只保留 CLI 启动；新平台不要把特殊解析逻辑塞进入口或 pipeline，优先在平台解析器中归一化为 `mediaStreams`。
 - 只有多个平台共同需要的能力，才考虑抽到 `scripts/utils/`。
@@ -105,7 +105,9 @@
 - 平台可能返回音视频合流或 DASH 分轨时，解析器应先归一化为 `mediaStreams`。例如抖音 `media-video-*` 是纯视频轨，必须搭配 `media-audio-*` 或明确失败；`media-audio-*` 不能标记为 `video+audio`。
 - 解析器可以结合 response 拦截、页面初始状态和 runtime 媒体资源兜底，但必须优先匹配目标 URL/目标内容 ID，避免拿到推荐流或无关卡片。
 - B站这类页面可能播放正常但没有被 response 监听捕获到 `playurl`，应优先尝试页面 `__playinfo__` 和主动 API fallback。
-- 小红书这类页面可能显示登录弹窗，但公开笔记数据仍在 `__INITIAL_STATE__` 或媒体响应中；不要只因登录弹窗就放弃。
+- 小红书这类页面可能显示登录弹窗，但公开笔记数据仍在 `__INITIAL_STATE__` 或媒体响应中；不要只因登录弹窗就放弃。canonical URL、`xhslink.cn` 和 `xhslink.com` 的规则必须留在小红书插件自己的 `matchesUrl()`；短链跳转后按 canonical URL 提取目标 noteId。
+- 已知小红书目标 noteId 时，API 和页面状态只能返回精确匹配项，不得回退到首条推荐笔记；无关 feed/CDN 响应不能提前结束等待。目标笔记媒体优先，通用 runtime CDN 只有在目标笔记已绑定后才可兜底。
+- 当前通用下载器不支持 HLS 分片。平台插件不得把 `.m3u8` 清单、`.ts` / `.m2ts` 分片或对应 HLS MIME 候选标成 `format: "mp4"`；小红书这类 MP4 直链平台应在候选收集阶段排除 HLS，只返回可直接下载和校验的 MP4。
 - 快手详情页同时加载目标作品和推荐流；必须按重定向后的 `photoId` 匹配 Apollo/GraphQL 详情，不能从推荐媒体中直接选择最大文件。
 - 微博必须按 URL 的 `fid`/`oid` 匹配 `/tv/api/component` 和 CDN `media_id`；清晰度应按标签或 `template=WxH` 排序，不能依赖接口对象顺序。CDN URL 带短时签名，重试时重新解析。
 - 能识别删除、私密、登录限制、地区限制时，标记为永久失败。
@@ -133,6 +135,7 @@
 | 新增或移除支持平台 | `README.md`, `README_zh.md`, `SKILL.md`, `examples/usage.md`, `references/architecture.md`, 本文件 |
 | 修改 CLI 参数或默认值 | `scripts/cli/options.js`, `README.md`, `README_zh.md`, `SKILL.md`, `examples/usage.md` |
 | 修改插件发现、契约或隔离行为 | `scripts/platforms/router.js`, `scripts/platforms/base.js`, `references/architecture.md`, 本文件 |
+| 修改 URL 路由、未匹配诊断或批次路由摘要 | `README.md`, `README_zh.md`, `SKILL.md`, `examples/usage.md`, `references/architecture.md`, 本文件 |
 | 修改输出 JSON 结构 | `README.md`, `README_zh.md`, `SKILL.md`, `examples/sample_output.json`, `references/architecture.md` |
 | 修改依赖或环境要求 | `package.json`, `package-lock.json`, `requirements.txt`, `README.md`, `README_zh.md`, `SKILL.md` |
 | 修改下载、合并或转写流程 | `SKILL.md`, `references/architecture.md`, `README.md`, `README_zh.md` |
@@ -143,7 +146,7 @@
 
 - 代码修改：先运行 `npm test`，确认插件发现、路由和统一结果契约测试通过。
 - 文档或版本修改：运行 `node scripts/download.mjs --help`，并做关键词搜索。
-- 路由或 URL 匹配修改：做 route-level 检查，确认目标 URL 被正确分发，并验证无效插件被跳过后其他插件仍可加载。
+- 路由或 URL 匹配修改：做 route-level 检查，确认目标 URL 被正确分发，并验证无效插件被跳过后其他插件仍可加载；同时覆盖混合匹配/未匹配输入、stderr 警告、`download-summary.json.routing` 和全部未匹配 exit `2`。
 - 插件发现修改：覆盖单文件插件、`<id>/index.js` 插件、重复 ID、契约缺失和 `--disable-platform`（重复参数及逗号分隔）。
 - 新平台解析器：至少用一个公开视频跑 `--no-transcribe`。
 - 下载流程修改：优先用 `--no-transcribe` 验证下载和元数据输出。

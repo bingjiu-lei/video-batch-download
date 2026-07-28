@@ -45,6 +45,12 @@ test("batch summary counts transcription failures separately and records runtime
     accessMode: "anonymous",
     platforms: [],
     platformWarnings: [],
+    routing: {
+      discovered: 3,
+      matched: 2,
+      unmatched: 1,
+      unmatchedUrls: ["https://example.com/video/1"],
+    },
   });
 
   assert.equal(summary.completed, 1);
@@ -59,6 +65,12 @@ test("batch summary counts transcription failures separately and records runtime
   assert.equal(summary.results[1].status, "transcription_failed");
   assert.match(summary.runId, /^[0-9a-f-]{36}$/u);
   assert.equal(summary.agentReview.status, "completed");
+  assert.deepEqual(summary.routing, {
+    discovered: 3,
+    matched: 2,
+    unmatched: 1,
+    unmatchedUrls: ["https://example.com/video/1"],
+  });
 });
 
 test("batch summary treats undefined transcribe as enabled (same as download/phase gating)", async () => {
@@ -90,6 +102,12 @@ test("batch summary treats undefined transcribe as enabled (same as download/pha
     model: "medium",
     device: "cpu",
     compute_type: "int8",
+  });
+  assert.deepEqual(summary.routing, {
+    discovered: 1,
+    matched: 1,
+    unmatched: 0,
+    unmatchedUrls: [],
   });
 });
 

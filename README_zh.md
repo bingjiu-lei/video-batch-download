@@ -24,7 +24,7 @@
 | 抖音           | ✅ 已支持 | 公开视频；支持合流/分离流下载与合并  |
 | B站 / Bilibili | ✅ 已支持 | 公开视频；支持 DASH 合并与播放流兜底 |
 | 快手           | ✅ 已支持 | 公开视频；按作品 ID 精确读取页面详情 |
-| 小红书         | ✅ 已支持 | 公开视频笔记；支持笔记定位与媒体兜底 |
+| 小红书         | ✅ 已支持 | 公开视频笔记；精确绑定笔记，仅直连 MP4 |
 | 微博           | ✅ 已支持 | 公开视频；自动选择无登录态的最高画质合流 MP4 |
 | 更多平台       | 🚧 计划中 | 可通过平台适配层继续扩展             |
 
@@ -37,7 +37,7 @@
 - **无登录态的最高画质**：枚举无登录态实际可访问的候选流，按画质选择最高档，并记录选择依据与降级原因。
 - **分离流支持**：B站和抖音遇到视频/音频分离媒体流时，会自动下载并通过 ffmpeg 合并。
 - **运行时兜底**：结合平台 API、页面状态和浏览器实际观察到的媒体响应，提高 B站/抖音/快手/小红书/微博稳定性。
-- **可插拔平台适配器**：运行时自动发现平台插件、校验统一契约；单个插件损坏不会拖垮其他平台。
+- **可插拔平台适配器**：运行时自动发现平台插件，URL 规则由各插件自己的 `matchesUrl()` 维护，并校验统一契约；单个插件损坏不会拖垮其他平台。
 - **媒体轨道校验**：最终 MP4 必须含视频轨；默认转写时还要求可用音轨（`--no-transcribe` 可跳过音轨要求）。
 - **成品画质校验**：通过 ffprobe 核对分辨率、帧率、编码和 HDR；最高候选失效时按画质顺序降级。
 - **断点续跑**：重复运行时可跳过已完成下载和已有转写结果；失败项支持指数退避重试。
@@ -64,7 +64,8 @@
 - B站高画质视频需要 ffmpeg 合并 DASH 流
 - “无登录态的最高画质”指平台在不登录账号时实际开放的最高档，不代表登录后、会员专享或上传原片画质；例如 B站无登录态页面可能只开放 480P
 - 抖音可能返回视频/音频分离流；纯音频资源会被拒绝，不会误存为视频
-- 小红书仅支持视频笔记，不支持图文笔记；公开视频笔记即使出现登录弹窗，也可能通过页面状态和媒体响应解析
+- 小红书仅支持视频笔记，不支持图文笔记。canonical URL 与 `xhslink.cn` / `xhslink.com` 短链均由小红书插件自身匹配；短链跳转后，只接受与目标 noteId 精确对应的 API/页面状态，不会回退到推荐笔记。媒体优先取目标笔记自身候选，只有目标笔记已经绑定后才允许通用 runtime CDN 受控兜底。
+- 当前下载器未实现 HLS。小红书会排除 HLS 清单与分片（包括 `.m3u8`、`.ts`、`.m2ts` 候选），只接受可直接下载并校验的 MP4。
 - 快手按重定向后的作品 ID 匹配 Apollo/GraphQL 详情，避免误下载推荐流；风控页面需要稍后重试或使用有头模式
 - 微博支持公开的 `video.weibo.com/show?fid=1034:...` 和 `weibo.com/tv/show/1034:...` 视频；无登录态访客验证或短时有效的 CDN 地址可能需要重试或使用有头模式
 - 短分享链接可能过期或跳转到无关推荐页；可用时优先使用平台规范 URL
@@ -100,9 +101,11 @@ git clone https://github.com/ljb1020/video-batch-download.git %USERPROFILE%\.cla
 
 > "帮我提取这个抖音视频的文案 https://v.douyin.com/xxxxx"
 > "提取这个B站视频的语音 https://www.bilibili.com/video/BVxxxxx"
-> "下载这个小红书视频 http://xhslink.com/xxxxx"
+> "下载这个小红书视频 http://xhslink.cn/o/xxxxx"
 > "下载这个快手视频 https://v.kuaishou.com/xxxxx"
 > "下载并转写这个微博视频 https://video.weibo.com/show?fid=1034:5317814823878730"
+
+小红书短链同时支持 `xhslink.cn` 和 `xhslink.com`。
 
 ### 作为命令行工具安装
 
@@ -143,6 +146,7 @@ node scripts/download.mjs "https://v.douyin.com/xxxxx"
 node scripts/download.mjs "https://www.bilibili.com/video/BVxxxxx"
 node scripts/download.mjs "https://v.kuaishou.com/xxxxx"
 node scripts/download.mjs "https://www.xiaohongshu.com/explore/xxxxx"
+node scripts/download.mjs "http://xhslink.cn/o/xxxxx"
 node scripts/download.mjs "https://video.weibo.com/show?fid=1034:5317814823878730"
 ```
 
@@ -150,11 +154,26 @@ node scripts/download.mjs "https://video.weibo.com/show?fid=1034:531781482387873
 
 ```bash
 # 支持混合平台
-node scripts/download.mjs "https://v.douyin.com/xxxxx" "https://www.bilibili.com/video/BVxxxxx" "https://v.kuaishou.com/xxxxx" "http://xhslink.com/xxxxx" "https://video.weibo.com/show?fid=1034:5317814823878730"
+node scripts/download.mjs "https://v.douyin.com/xxxxx" "https://www.bilibili.com/video/BVxxxxx" "https://v.kuaishou.com/xxxxx" "http://xhslink.cn/o/xxxxx" "https://video.weibo.com/show?fid=1034:5317814823878730"
 
 # 自定义输出目录
 node scripts/download.mjs "url" --output ./my_output
 ```
+
+没有被任何已加载插件匹配的 URL 会写入 stderr 警告，不再静默丢失。混合批次继续处理支持的 URL，并在 `download-summary.json` 中记录去重后的路由统计：
+
+```json
+{
+  "routing": {
+    "discovered": 2,
+    "matched": 1,
+    "unmatched": 1,
+    "unmatchedUrls": ["https://example.com/video/1"]
+  }
+}
+```
+
+如果发现的 URL 全部未匹配，则不会启动机器批次，命令退出码仍为 `2`。
 
 ### 从文本文件读取链接
 
@@ -262,7 +281,7 @@ node scripts/agent-review.mjs finalize --summary ./video_results/download-summar
 | `failed` | 解析、下载或输出失败，可按错误情况重试。 |
 | `permanent_failure` | 内容无效、不可用或其它不可重试错误（已删除、私密、图文作品等）。 |
 
-这些是 `download-state.json` 中的机器状态；单条成功产物 JSON 仍使用 `status: "success"`。失败 JSON 与 `transcription_failed` 条目还会写入结构化字段，如 `error_code`、`error_category`、`error_stage`、`retryable`、`permanent`、`user_message`，以及可选的 `technical_error` / `suggestion`。`transcription_error` 始终是技术错误串；面向用户的中文说明在 `user_message`。下载 CLI 的退出码只表达机器阶段：`0` 表示机器阶段成功，`1` 表示存在机器失败，`2` 表示参数或输入错误。Agent 审阅仍为 `pending` 不会改变下载 CLI 退出码。
+这些是 `download-state.json` 中的机器状态；单条成功产物 JSON 仍使用 `status: "success"`。失败 JSON 与 `transcription_failed` 条目还会写入结构化字段，如 `error_code`、`error_category`、`error_stage`、`retryable`、`permanent`、`user_message`，以及可选的 `technical_error` / `suggestion`。`transcription_error` 始终是技术错误串；面向用户的中文说明在 `user_message`。下载 CLI 的退出码只表达机器阶段：`0` 表示机器阶段成功，`1` 表示存在机器失败，`2` 表示参数或输入错误（包括所有 URL 均未匹配）。混合批次中的未匹配 URL 只作为诊断信息，不改变其退出码。Agent 审阅仍为 `pending` 不会改变下载 CLI 退出码。
 
 审阅阶段有独立完成语义：`agent-review finalize` 返回 `0` 表示所有必需审阅完成或无需审阅，`1` 表示存在 failed/blocked/stale，`2` 表示参数、schema 或状态损坏，`3` 表示 pending/paused/有效 in-progress 等可恢复待续状态。只有机器阶段满足用户请求且审阅 finalize 返回 `0`，整个 Skill 任务才算完成。
 

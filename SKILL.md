@@ -37,12 +37,12 @@ Default transcription starts with `medium + cuda + float16 + zh`. If the default
 
 ## Workflow
 
-1. **Receive URLs** — User provides one or more Douyin, Bilibili, Kuaishou, Xiaohongshu or Weibo links (or share text containing links). The script discovers platform plugins at runtime, skips disabled or broken plugins, and routes extracted URLs through each plugin's `matchesUrl()` method.
+1. **Receive URLs** — User provides one or more Douyin, Bilibili, Kuaishou, Xiaohongshu or Weibo links (or share text containing links). The script discovers platform plugins at runtime, skips disabled or broken plugins, and routes extracted URLs through each plugin's `matchesUrl()` method. It reports unmatched URLs on stderr and, when at least one URL matches, persists `routing.discovered`, `matched`, `unmatched`, and `unmatchedUrls` in `download-summary.json`.
 2. **Ask for output directory** — If user doesn't specify, default to `./video_results/`.
 3. **Run the machine pipeline**:
     - Keep `scripts/download.mjs` as a thin CLI entry and delegate orchestration to the modular pipeline
     - Parse video metadata via Playwright browser interception, page state, and runtime media fallbacks; enumerate candidates available without login, rank them by quality, then validate the normalized result (concurrency 1 by default for stability)
-    - Download MP4 via CDN URL into `<output>/.temp` cache (concurrency 1 by default for stability). For Bilibili and Douyin separated media streams, downloads video and audio separately and merges with ffmpeg.
+    - Download MP4 via CDN URL into `<output>/.temp` cache (concurrency 1 by default for stability). For Bilibili and Douyin separated media streams, downloads video and audio separately and merges with ffmpeg. The current downloader does not implement HLS, so Xiaohongshu excludes HLS manifests and segments (including `.m3u8`, `.ts`, and `.m2ts`) and accepts only directly downloadable/verifiable MP4 candidates.
     - Validate the final MP4 tracks and expected resolution/frame-rate/HDR; if the top candidate fails, try the next quality candidate available without login
     - Extract audio with ffmpeg → transcribe with local faster-whisper (model reused; recognized CUDA startup or runtime failures automatically fall back to CPU when device/precision were not explicitly selected)
     - Convert Traditional Chinese to Simplified via OpenCC
@@ -89,6 +89,7 @@ node scripts/download.mjs "https://v.douyin.com/xxxxx"
 node scripts/download.mjs "https://www.bilibili.com/video/BVxxxxx"
 node scripts/download.mjs "https://v.kuaishou.com/xxxxx"
 node scripts/download.mjs "https://www.xiaohongshu.com/explore/xxxxx"
+node scripts/download.mjs "http://xhslink.cn/o/xxxxx"
 node scripts/download.mjs "https://video.weibo.com/show?fid=1034:5317814823878730"
 ```
 
@@ -107,7 +108,7 @@ node scripts/download.mjs "url" --output ./my_output
 ### Mixed platforms
 
 ```bash
-node scripts/download.mjs "https://v.douyin.com/xxxxx" "https://www.bilibili.com/video/BVxxxxx" "https://v.kuaishou.com/xxxxx" "http://xhslink.com/xxxxx" "https://video.weibo.com/show?fid=1034:5317814823878730"
+node scripts/download.mjs "https://v.douyin.com/xxxxx" "https://www.bilibili.com/video/BVxxxxx" "https://v.kuaishou.com/xxxxx" "http://xhslink.cn/o/xxxxx" "https://video.weibo.com/show?fid=1034:5317814823878730"
 ```
 
 ### From a text file
@@ -224,7 +225,20 @@ The JSON `transcript` and `segments` preserve the raw faster-whisper output. Age
 - `failed`: parsing, downloading, or output generation failed and may be retried.
 - `permanent_failure`: the content is unavailable, invalid, or otherwise not retryable (deleted, private, unsupported image/text notes, etc.).
 
-These are `download-state.json` machine states; a successful per-item output JSON retains `status: "success"`. Failure JSON and `transcription_failed` items also carry structured fields such as `error_code`, `error_category`, `error_stage`, `retryable`, `permanent`, `user_message`, and optional `technical_error` / `suggestion`. `transcription_error` is the technical message; user-facing Chinese copy lives in `user_message`. The download CLI exits `0` for a successful machine phase, `1` for machine failures, and `2` for input/argument errors. Pending Agent review does not change those exit codes.
+These are `download-state.json` machine states; a successful per-item output JSON retains `status: "success"`. Failure JSON and `transcription_failed` items also carry structured fields such as `error_code`, `error_category`, `error_stage`, `retryable`, `permanent`, `user_message`, and optional `technical_error` / `suggestion`. `transcription_error` is the technical message; user-facing Chinese copy lives in `user_message`. The download CLI exits `0` for a successful machine phase, `1` for machine failures, and `2` for input/argument errors. A mixed batch continues with matched URLs while warning about unmatched URLs; if every discovered URL is unmatched, it exits `2`. Pending Agent review does not change those exit codes.
+
+For a mixed batch, the summary includes routing diagnostics such as:
+
+```json
+{
+  "routing": {
+    "discovered": 2,
+    "matched": 1,
+    "unmatched": 1,
+    "unmatchedUrls": ["https://example.com/video/1"]
+  }
+}
+```
 
 Review completion is separate: `agent-review finalize` exits `0` when all required reviews are complete or none are required, `1` for failed/blocked/stale work, `2` for invalid arguments/schema/state, and `3` for resumable pending/paused/in-progress work. `transcription_failed` has no TXT to edit but blocks overall Skill completion.
 
@@ -343,7 +357,7 @@ A successful transcription that detects no speech remains `completed` and produc
 - Output JSON records sanitized available/selected streams, the selector version, advertised versus accessible qualities, and fallback reasons.
 - Bilibili high-quality videos use DASH format (separate video/audio streams) — automatically merged with ffmpeg; selection still means the highest quality available without login and accepts only streams the service actually returns.
 - Douyin may expose merged MP4 or separated `media-video-*` / `media-audio-*` streams; audio-only resources are never treated as completed videos.
-- Xiaohongshu: video notes only; image/text notes are not supported. Login overlays may still expose public video-note state, so parser checks the target note state and media responses before failing.
+- Xiaohongshu: canonical note URLs plus `xhslink.cn` and `xhslink.com` short links are supported by the plugin's own `matchesUrl()`. After redirect, a known target note ID must match exact API/page-state data; unrelated feed notes are never used as fallback and unrelated media cannot end the wait early. Target-note media is preferred, with generic runtime CDN candidates allowed only after the target note is bound. Video notes only; image/text notes and HLS manifests/segments such as `.m3u8`, `.ts`, and `.m2ts` are not supported.
 - Kuaishou resolves short links, matches Apollo/GraphQL detail data by the target photo ID, and rejects unrelated recommendation media.
 - Weibo matches the target `fid`/`oid`, prefers `/tv/api/component` metadata and the highest quality available without login, and falls back to matching page/CDN media. Visitor checks without login or expiring CDN URLs may require a retry or `--headed` mode.
 - Platform plugins are discovered from `scripts/platforms/*.js` and `scripts/platforms/<id>/index.js`; a single plugin load failure is reported and isolated.

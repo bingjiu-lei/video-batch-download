@@ -7,7 +7,7 @@ import { QUALITY_SELECTION_VERSION } from "../core/policies.js";
 import { clearTempCache, getExistingCacheVideoPath } from "../core/resume.js";
 import { abortActiveDownloads } from "../media/downloader.js";
 import { terminateActiveMediaProcesses } from "../media/ffmpeg.js";
-import { extractAndRouteUrls, getPlatformId, loadPlatforms } from "../platforms/router.js";
+import { extractAndRouteUrlReport, getPlatformId, loadPlatforms } from "../platforms/router.js";
 import { TranscriptionClient } from "../transcription/client.js";
 import { writeBatchSummary } from "../output/writer.js";
 import { buildInitialAgentReviewSummary } from "../review/coordinator.js";
@@ -24,6 +24,7 @@ export async function buildSummary({
   accessMode,
   platforms,
   platformWarnings,
+  routing,
   runId = randomUUID(),
 }) {
   const urls = urlsWithParsers.map(({ url }) => url);
@@ -96,6 +97,12 @@ export async function buildSummary({
         }
       : null,
     agentReview: reviewAggregate,
+    routing: routing ?? {
+      discovered: urls.length,
+      matched: urls.length,
+      unmatched: 0,
+      unmatchedUrls: [],
+    },
     platforms: platforms.map((ParserClass) => getPlatformId(ParserClass)),
     platformWarnings,
     results: publicResults,
@@ -126,7 +133,17 @@ export async function runBatch(options) {
     (platforms.map((ParserClass) => getPlatformId(ParserClass)).join(", ") || "none"),
   );
 
-  const urlsWithParsers = await extractAndRouteUrls(inputText, { platforms });
+  const routeReport = await extractAndRouteUrlReport(inputText, { platforms });
+  const urlsWithParsers = routeReport.matched;
+  const routing = {
+    discovered: routeReport.matched.length + routeReport.unmatched.length,
+    matched: routeReport.matched.length,
+    unmatched: routeReport.unmatched.length,
+    unmatchedUrls: routeReport.unmatched,
+  };
+  for (const url of routeReport.unmatched) {
+    console.warn(`[routing] warning: no loaded platform matched URL: ${url}`);
+  }
   if (urlsWithParsers.length === 0) {
     console.error("No supported video URLs were found.");
     return { exitCode: 2, summary: null };
@@ -201,6 +218,7 @@ export async function runBatch(options) {
       accessMode,
       platforms,
       platformWarnings,
+      routing,
       runId,
     });
     await writeBatchSummary(options.output, summary);

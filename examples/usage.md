@@ -6,8 +6,11 @@ All platforms use the same policy: select the highest quality available without 
 
 ```bash
 node scripts/download.mjs "https://v.kuaishou.com/xxxxx" --no-transcribe
+node scripts/download.mjs "http://xhslink.cn/o/xxxxx" --no-transcribe
 node scripts/download.mjs "https://video.weibo.com/show?fid=1034:5317814823878730" --no-transcribe
 ```
+
+Xiaohongshu accepts canonical note URLs and short links from both `xhslink.cn` and `xhslink.com`. After a short-link redirect, the parser binds to the exact target note ID instead of falling back to recommendation notes. It prefers media from that bound note and uses generic runtime CDN media only as a controlled fallback. The current downloader is MP4-only for Xiaohongshu: HLS manifests and segments such as `.m3u8`, `.ts`, and `.m2ts` are ignored.
 
 ## Example: Extract a transcript from one Douyin video
 
@@ -48,9 +51,26 @@ douyin_results/
 node scripts/download.mjs \
   "https://v.douyin.com/abc123" \
   "https://www.bilibili.com/video/BVxxxxx" \
+  "http://xhslink.cn/o/xxxxx" \
+  "https://example.com/video/1" \
   "https://video.weibo.com/show?fid=1034:5317814823878730" \
   --output ./my_results
 ```
+
+The unsupported URL is reported on stderr as a routing warning, while the supported URLs continue. The batch summary records de-duplicated discovery results:
+
+```json
+{
+  "routing": {
+    "discovered": 5,
+    "matched": 4,
+    "unmatched": 1,
+    "unmatchedUrls": ["https://example.com/video/1"]
+  }
+}
+```
+
+Unmatched URLs do not change the exit code of an otherwise successful mixed batch. If all discovered URLs are unmatched, the command exits with code `2` and no machine batch is started.
 
 Review only the items listed by this run's summary:
 
@@ -110,7 +130,7 @@ After all buckets finish:
 node scripts/agent-review.mjs finalize --summary ./my_results/download-summary.json
 ```
 
-The download command and review finalization are separate phases. Download exit `0` means the machine phase succeeded; `finalize` exit `0` means review completed or was not required. `finalize` exit `3` means work is safely resumable, while `1` means failed/blocked/stale work and `2` means invalid arguments/schema/state.
+The download command and review finalization are separate phases. Download exit `0` means the matched machine batch succeeded, `1` means it contains machine failures, and `2` includes invalid input or a batch where every URL is unmatched. `finalize` exit `0` means review completed or was not required. `finalize` exit `3` means work is safely resumable, while `1` means failed/blocked/stale work and `2` means invalid arguments/schema/state.
 
 The program does not call a correction model API. The main/sub-Agents perform language review in the current Agent host, so that host's data handling and privacy rules apply. If strict local-only handling is required, skip Agent review and use the raw machine output.
 

@@ -118,13 +118,14 @@ export async function routeUrl(url, options = {}) {
   return null;
 }
 
-/** Extract, de-duplicate and route supported URLs from arbitrary share text. */
-export async function extractAndRouteUrls(text, options = {}) {
+/** Extract, de-duplicate and route URLs from arbitrary share text. */
+export async function extractAndRouteUrlReport(text, options = {}) {
   const genericUrlRe = /https?:\/\/[^\s<>"']+/gi;
   const urls = [...text.matchAll(genericUrlRe)].map((match) =>
     match[0].replace(/[，。！？；：、,.!?;:)}\]>]+$/u, "")
   );
-  const result = [];
+  const matched = [];
+  const unmatched = [];
   const seen = new Set();
   const platforms = options.platforms ?? await loadPlatforms(options);
 
@@ -132,7 +133,14 @@ export async function extractAndRouteUrls(text, options = {}) {
     if (seen.has(url)) continue;
     seen.add(url);
     const ParserClass = await routeUrl(url, { ...options, platforms });
-    if (ParserClass) result.push({ url, ParserClass });
+    if (ParserClass) matched.push({ url, ParserClass });
+    else unmatched.push(url);
   }
-  return result;
+  return { matched, unmatched };
+}
+
+/** Extract, de-duplicate and route supported URLs from arbitrary share text. */
+export async function extractAndRouteUrls(text, options = {}) {
+  const report = await extractAndRouteUrlReport(text, options);
+  return report.matched;
 }

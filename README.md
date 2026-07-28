@@ -24,7 +24,7 @@
 | Douyin         | ✅ Supported  | Public videos; merged/separated stream handling   |
 | Bilibili       | ✅ Supported  | Public videos; DASH merge and playurl fallbacks   |
 | Kuaishou       | ✅ Supported  | Public videos; exact photo-ID page-state matching |
-| Xiaohongshu    | ✅ Supported  | Public video notes; note and media fallbacks      |
+| Xiaohongshu    | ✅ Supported  | Public video notes; exact note binding, direct MP4 |
 | Weibo          | ✅ Supported  | Public videos; highest quality available without login |
 | More platforms |    🚧 Planned | Extendable through the platform adapter layer     |
 
@@ -37,7 +37,7 @@
 - **Highest quality available without login** — enumerates streams actually accessible without an account session, selects the best candidate, and records why it was selected or downgraded.
 - **Separated stream support** — downloads and merges separated video/audio streams with ffmpeg for Bilibili and Douyin when needed.
 - **Runtime fallbacks** — uses platform APIs, page state, and browser-observed media responses to improve Bilibili/Douyin/Kuaishou/Xiaohongshu/Weibo reliability.
-- **Pluggable platform adapters** — discovers adapters at runtime, validates their shared contract, and isolates a broken adapter so other platforms can keep working.
+- **Pluggable platform adapters** — discovers adapters at runtime, keeps URL rules in each plugin's `matchesUrl()`, validates their shared contract, and isolates a broken adapter so other platforms can keep working.
 - **Media track validation** — requires a video track in the final MP4; when transcription is enabled, a usable audio track is also required (`--no-transcribe` skips the audio requirement).
 - **Output quality validation** — verifies resolution, frame rate, codec, and HDR with ffprobe, then falls back in quality order when the best candidate fails.
 - **Resumable workflow** — reruns can skip completed downloads and existing transcripts; failed items auto-retry with exponential backoff.
@@ -64,7 +64,8 @@ Additional practical limits:
 - Bilibili high-quality videos require ffmpeg for DASH stream merging
 - “Highest quality available without login” means the best stream exposed without an account session, not signed-in/member/upload-original quality; Bilibili may expose only 480P without login
 - Douyin may return separated video/audio streams; audio-only resources are rejected instead of being saved as videos
-- Xiaohongshu image/text notes are not supported (video notes only); public video notes can still work when a login overlay is shown
+- Xiaohongshu image/text notes are not supported (video notes only). Canonical URLs and `xhslink.cn` / `xhslink.com` short links are matched by the Xiaohongshu plugin itself. After redirect, a known target note ID must match exact API/page-state data; recommendation notes are never used as fallback. Target-note media is preferred, and generic runtime CDN media is considered only after the target note has been bound.
+- The current downloader does not implement HLS. Xiaohongshu excludes HLS manifests and segments (including `.m3u8`, `.ts`, and `.m2ts` candidates); only directly downloadable and verifiable MP4 candidates are accepted.
 - Kuaishou matches Apollo/GraphQL detail data by the redirected photo ID to avoid downloading recommendation feeds; risk-control pages may require a later retry or headed mode
 - Weibo supports public `video.weibo.com/show?fid=1034:...` and `weibo.com/tv/show/1034:...` videos. Visitor checks without login or expiring CDN URLs may require a retry or `--headed` mode
 - Short share links may expire or redirect to unrelated feed pages; use canonical URLs when available
@@ -100,9 +101,11 @@ In Claude Code, paste a public video link and ask for download or transcript ext
 
 > "帮我提取这个抖音视频的文案 https://v.douyin.com/xxxxx"
 > "提取这个B站视频的语音 https://www.bilibili.com/video/BVxxxxx"
-> "下载这个小红书视频 http://xhslink.com/xxxxx"
+> "下载这个小红书视频 http://xhslink.cn/o/xxxxx"
 > "下载这个快手视频 https://v.kuaishou.com/xxxxx"
 > "下载并转写这个微博视频 https://video.weibo.com/show?fid=1034:5317814823878730"
+
+Xiaohongshu short links from both `xhslink.cn` and `xhslink.com` are supported.
 
 ### Install as a CLI Tool
 
@@ -143,6 +146,7 @@ node scripts/download.mjs "https://v.douyin.com/xxxxx"
 node scripts/download.mjs "https://www.bilibili.com/video/BVxxxxx"
 node scripts/download.mjs "https://v.kuaishou.com/xxxxx"
 node scripts/download.mjs "https://www.xiaohongshu.com/explore/xxxxx"
+node scripts/download.mjs "http://xhslink.cn/o/xxxxx"
 node scripts/download.mjs "https://video.weibo.com/show?fid=1034:5317814823878730"
 ```
 
@@ -150,11 +154,26 @@ node scripts/download.mjs "https://video.weibo.com/show?fid=1034:531781482387873
 
 ```bash
 # Mixed platforms are supported
-node scripts/download.mjs "https://v.douyin.com/xxxxx" "https://www.bilibili.com/video/BVxxxxx" "https://v.kuaishou.com/xxxxx" "http://xhslink.com/xxxxx" "https://video.weibo.com/show?fid=1034:5317814823878730"
+node scripts/download.mjs "https://v.douyin.com/xxxxx" "https://www.bilibili.com/video/BVxxxxx" "https://v.kuaishou.com/xxxxx" "http://xhslink.cn/o/xxxxx" "https://video.weibo.com/show?fid=1034:5317814823878730"
 
 # Custom output directory
 node scripts/download.mjs "url" --output ./my_output
 ```
+
+URLs that no loaded plugin matches are reported on stderr instead of being silently dropped. A mixed batch continues with its supported URLs and records the de-duplicated routing totals in `download-summary.json`:
+
+```json
+{
+  "routing": {
+    "discovered": 2,
+    "matched": 1,
+    "unmatched": 1,
+    "unmatchedUrls": ["https://example.com/video/1"]
+  }
+}
+```
+
+If every discovered URL is unmatched, no machine batch starts and the command exits with code `2`.
 
 ### Read links from a file
 
@@ -262,7 +281,7 @@ For strict local-only handling or user opt-out, run `reconcile --summary ./video
 | `failed` | Parsing, download, or output generation failed and may be retried. |
 | `permanent_failure` | The content is unavailable, invalid, or otherwise not retryable (deleted, private, unsupported image/text notes, etc.). |
 
-These are `download-state.json` machine states; a successful per-item output JSON retains `status: "success"`. Failure JSON and `transcription_failed` items also carry structured fields such as `error_code`, `error_category`, `error_stage`, `retryable`, `permanent`, `user_message`, and optional `technical_error` / `suggestion`. `transcription_error` is always the technical message; user-facing Chinese copy lives in `user_message`. The download CLI returns `0` for a successful machine phase, `1` for machine failures, and `2` for input/argument errors. Pending Agent review does not change the download CLI exit code.
+These are `download-state.json` machine states; a successful per-item output JSON retains `status: "success"`. Failure JSON and `transcription_failed` items also carry structured fields such as `error_code`, `error_category`, `error_stage`, `retryable`, `permanent`, `user_message`, and optional `technical_error` / `suggestion`. `transcription_error` is always the technical message; user-facing Chinese copy lives in `user_message`. The download CLI returns `0` for a successful machine phase, `1` for machine failures, and `2` for input/argument errors, including input where every URL is unmatched. Unmatched URLs in an otherwise supported mixed batch are diagnostic only and do not change its exit code. Pending Agent review does not change the download CLI exit code.
 
 Review has separate completion semantics: `agent-review finalize` returns `0` when all required reviews are complete (or none are required), `1` for failed/blocked/stale items, `2` for argument/schema/state errors, and `3` while pending/paused/valid in-progress work can be resumed. The overall Skill task is complete only when the requested machine phase succeeds and review finalization returns `0`.
 

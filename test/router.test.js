@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  extractAndRouteUrlReport,
   extractAndRouteUrls,
   loadPlatforms,
   routeUrl,
@@ -52,6 +53,19 @@ test("extractAndRouteUrls extracts supported URLs, trims punctuation, and remove
   assert.equal(routed[1].ParserClass.platformId, "bilibili");
 });
 
+test("extractAndRouteUrlReport reports unsupported URLs without changing the compatibility API", async () => {
+  const supported = "https://www.douyin.com/video/1234567890";
+  const unsupported = "https://example.com/video/1";
+  const text = `${supported}\n${unsupported}。\n${unsupported}`;
+
+  const report = await resultOf(extractAndRouteUrlReport(text));
+  const routed = await resultOf(extractAndRouteUrls(text));
+
+  assert.deepEqual(report.matched.map(({ url }) => url), [supported]);
+  assert.deepEqual(report.unmatched, [unsupported]);
+  assert.deepEqual(routed.map(({ url }) => url), [supported]);
+});
+
 test("routeUrl recognizes Weibo video URLs", async () => {
   const ParserClass = await resultOf(
     routeUrl("https://video.weibo.com/show?fid=1034:5317814823878730"),
@@ -59,6 +73,24 @@ test("routeUrl recognizes Weibo video URLs", async () => {
 
   assert.ok(ParserClass, "the Weibo plugin should be loaded");
   assert.equal(ParserClass.platformId, "weibo");
+});
+
+test("Xiaohongshu short links support both xhslink.cn and xhslink.com", async () => {
+  for (const url of [
+    "http://xhslink.cn/o/current-short-link",
+    "http://xhslink.com/o/legacy-short-link",
+  ]) {
+    const ParserClass = await resultOf(routeUrl(url));
+    assert.ok(ParserClass, `the Xiaohongshu plugin should route ${url}`);
+    assert.equal(ParserClass.platformId, "xiaohongshu");
+  }
+
+  const routed = await resultOf(
+    extractAndRouteUrls("别再说不会聊天了 http://xhslink.cn/o/share-text"),
+  );
+  assert.equal(routed.length, 1);
+  assert.equal(routed[0].url, "http://xhslink.cn/o/share-text");
+  assert.equal(routed[0].ParserClass.platformId, "xiaohongshu");
 });
 
 test("disabledPlatforms disables one plugin without affecting the others", async () => {

@@ -9,7 +9,7 @@
 - 抖音（Douyin）— 合流 MP4 或视频/音频分离流，自动合并并校验轨道
 - B站（Bilibili）— DASH 多流（视频+音频分离）自动合并，支持播放流兜底
 - 快手（Kuaishou）— 按目标作品 ID 读取 Apollo/GraphQL 详情和 H.264 MP4
-- 小红书（Xiaohongshu）— 视频笔记单流 MP4，支持目标笔记状态和媒体响应兜底
+- 小红书（Xiaohongshu）— 严格绑定目标视频笔记，选择直连 MP4，排除 HLS
 - 微博（Weibo）— 按目标 `fid`/`oid` 读取组件数据，选择无登录态的最高画质合流 MP4
 
 ---
@@ -91,6 +91,7 @@ download.mjs
 |---|---|---|
 | 插件发现 | 运行时扫描 `platforms/*.js` 和 `platforms/<id>/index.js` | 新增或删除平台不修改核心路由 |
 | 平台识别 | 已加载插件依次执行 `matchesUrl()` | URL 规则由平台插件自行维护 |
+| 路由诊断 | URL 提取返回 `matched` / `unmatched` 详细报告 | 混合输入不再静默丢 URL，同时保持核心路由平台无关 |
 | 插件 ID | 优先 `static platformId` / `static id`，否则使用文件或目录名 | CLI 禁用和日志使用稳定标识 |
 | 故障隔离 | 每个插件独立 import、校验和跳过 | 单个平台损坏不影响其余平台启动 |
 | 临时禁用 | `--disable-platform <id>`，可重复或逗号分隔 | 平台故障时无需删代码即可下线 |
@@ -174,11 +175,20 @@ mediaStreams: [{
 
 ### 3.4 小红书（XiaohongshuParser）
 
+**入口 URL**：支持 canonical 笔记 URL，以及 `xhslink.cn` / `xhslink.com` 分享短链。这些规则由 `XiaohongshuParser.matchesUrl()` 自身维护，核心路由不包含小红书域名分支；短链由浏览器跳转到目标笔记页后再提取 noteId。
+
+**目标绑定**：
+- 一旦从 canonical URL 得到目标 noteId，feed API、note API 和 `window.__INITIAL_STATE__` 都只能返回该 ID 对应的笔记，禁止回退到响应或状态表中的第一条推荐笔记
+- 无关 feed、推荐卡片或通用 CDN 响应不能让等待循环提前结束；目标数据尚未出现时继续等待/重试
+- 已知目标 noteId 却未取得精确笔记数据时解析失败，不能用通用 CDN 候选伪造目标笔记
+
 **API / 媒体来源**：
 - `/api/sns/web/v1/feed` — 笔记元数据候选
 - `/api/sns/web/v1/note/info` — 笔记详情兜底
 - 页面 `window.__INITIAL_STATE__` — 按 URL 中的目标 noteId 精准读取 `noteDetailMap[noteId]`
-- `xhscdn.com` CDN — 视频 URL，包含页面 runtime 和媒体响应兜底
+- `xhscdn.com` CDN — 目标笔记自身媒体候选优先；只有精确笔记已经绑定且自身候选不可用时，页面 runtime / 媒体响应才作为受控兜底
+
+**媒体边界**：当前下载器没有 HLS 分片下载能力。小红书解析器排除 HLS 清单与分片（包括 `.m3u8`、`.ts`、`.m2ts` URL 及对应 MIME），不会把它们标记成 MP4；只输出可直接下载并由现有媒体校验流程验证的 MP4 候选。
 
 **限制**：
 - 仅支持视频笔记，不支持图文笔记
@@ -541,6 +551,19 @@ URL_3:      [解析]──[下载]──[提取音频]──[转写]──[输�
 
 成功时输出 `[platforms] loaded N: ...`；单插件导入或契约校验失败时输出 `[platforms] skipped <id>: ...` 并继续。路由阶段某插件的 `matchesUrl()` 抛错也只记录警告，不阻断其他插件匹配。
 
+`extractAndRouteUrlReport()` 对分享文本中的 URL 做清理、去重和逐插件匹配，返回 `{ matched, unmatched }`；兼容入口 `extractAndRouteUrls()` 继续只返回 `matched`。`runBatch` 对每个未匹配 URL 在 stderr 输出 `[routing] warning: no loaded platform matched URL: ...`，并在至少存在一个匹配项时把以下信息写入 `download-summary.json.routing`：
+
+```json
+{
+  "discovered": 5,
+  "matched": 4,
+  "unmatched": 1,
+  "unmatchedUrls": ["https://example.com/video/1"]
+}
+```
+
+混合批次继续处理匹配项，未匹配项只是可见诊断，不改变该批次退出码；所有 URL 均未匹配时不启动机器批次并退出 `2`。
+
 解析完成后，核心层调用 `validateParsedVideo()`，确保存在必要标识和至少一个合流流或一对视频/音频流，再进入下载阶段。
 
 ### 8.2 浏览器拦截机制（平台通用）
@@ -585,7 +608,7 @@ Python 脚本只做转写（faster-whisper + OpenCC），纯函数，输入 WAV 
 
 重跑时会先检查 `completed` 项所需的 JSON/TXT/MP4 产物是否仍存在；满足当前运行策略时直接跳过，否则复用 `.temp` 缓存或已有视频产物补齐缺失输出。
 
-批次摘要单独统计 `transcriptionFailed`。只要存在 `failed`、`permanent_failure` 或 `transcription_failed`，命令退出码即为 `1`。
+批次摘要单独统计 `transcriptionFailed`。只要存在 `failed`、`permanent_failure` 或 `transcription_failed`，命令退出码即为 `1`。路由层的未匹配 URL 另存于 `routing`，不伪装成视频处理结果。
 
 ### 8.5 输出文件
 
@@ -621,7 +644,7 @@ in_progress ──checkpoint──> in_progress
 
 上下文预算优先按宿主可用的窗口和已用上下文动态下调；无法确认时使用 40K 目标、60K 硬上限的保守默认。无子 Agent 时，主 Agent 按更小的单轮预算串行处理，checkpoint 后 `pause`，再由新的干净 Agent 会话运行 `reconcile/plan` 续审。无法获得新上下文时保留可恢复状态并报告未完成。
 
-机器阶段与审阅阶段使用两套退出语义：下载 CLI 的 `0/1/2` 只表示机器成功、机器失败、参数/输入错误；`agent-review finalize` 的 `0/1/2/3` 分别表示审阅完成、失败或阻塞、参数/schema/状态错误、可恢复待续。Skill 只有在机器阶段满足用户请求且 finalize 返回 `0` 时才完成。
+机器阶段与审阅阶段使用两套退出语义：下载 CLI 的 `0/1/2` 只表示机器成功、机器失败、参数/输入错误（包括全部 URL 未匹配）；混合批次中的未匹配 URL 不单独改变退出码。`agent-review finalize` 的 `0/1/2/3` 分别表示审阅完成、失败或阻塞、参数/schema/状态错误、可恢复待续。Skill 只有在机器阶段满足用户请求且 finalize 返回 `0` 时才完成。
 
 隐私口径必须拆开说明：下载、ffmpeg、faster-whisper 和 OpenCC 在本机程序中运行，程序不主动调用外部转写或纠正 API；启用 Agent 审阅后，TXT 的处理位置、留存和隐私规则取决于当前 Agent 宿主。严格本地场景运行 `reconcile --disable-review`，将未审阅项记录为 `required=false`、`reason=agent_review_disabled_by_user`，并交付机器原稿。
 
