@@ -411,7 +411,13 @@ export class XiaohongshuParser extends PlatformParser {
       }
 
       for (const video of document.querySelectorAll("video")) {
-        push(video.currentSrc || video.src, "video-current-src");
+        const url = video.currentSrc || video.src;
+        push(url, "video-current-src");
+        const candidate = candidates.find((item) => item.url === url);
+        if (candidate && video.videoWidth && video.videoHeight) {
+          candidate.width = video.videoWidth;
+          candidate.height = video.videoHeight;
+        }
       }
 
       return candidates;
@@ -586,11 +592,16 @@ export class XiaohongshuParser extends PlatformParser {
   }
 
   _buildQualityAudit(availableStreams, selected) {
-    const qualities = [...new Set(availableStreams.map((stream) => stream.label ?? stream.quality).filter(Boolean))];
+    // Streams from the origin-video-key / runtime fallback paths may carry no
+    // quality metadata at all; keep the audit fields informative regardless.
+    const qualities = [...new Set(availableStreams.map((stream) => {
+      const value = stream.label ?? stream.quality;
+      return value != null ? String(value) : null;
+    }).filter(Boolean))];
     return {
-      advertisedQualities: qualities,
-      accessibleQualities: qualities,
-      selectedQuality: selected?.label ?? selected?.quality ?? null,
+      advertisedQualities: qualities.length ? qualities : ["unknown"],
+      accessibleQualities: qualities.length ? qualities : ["unknown"],
+      selectedQuality: selected ? String(selected.label ?? selected.quality ?? "unknown") : null,
       selectionReason: "highest anonymous stream by resolution, frame rate, bitrate, and size; codec/source only break quality ties",
       limitedBy: null,
     };

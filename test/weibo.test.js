@@ -127,6 +127,21 @@ test("Weibo extracts dimensions from template and quality from labels", () => {
   );
 });
 
+test("Weibo strips HTML from playinfo text", () => {
+  const parser = new WeiboParser();
+
+  assert.equal(
+    parser._stripHtml('到底什么是真的<img src="//face.t.sinajs.cn/x.png" title="[哆啦A梦吃惊]" alt="[哆啦A梦吃惊]" />'),
+    "到底什么是真的[哆啦A梦吃惊]",
+  );
+  assert.equal(parser._stripHtml("第一行<br>第二行<br/>第三行"), "第一行\n第二行\n第三行");
+  assert.equal(parser._stripHtml("a &amp; b &lt;ok&gt; &nbsp;c &#39;d&#39; &quot;e&quot;"), "a & b <ok>  c 'd' \"e\"");
+  assert.equal(parser._stripHtml('<img src="//face.t.sinajs.cn/x.png" />只剩文字'), "只剩文字");
+  assert.equal(parser._stripHtml(null), null);
+  assert.equal(parser._stripHtml(undefined), null);
+  assert.equal(parser._stripHtml("   "), null);
+});
+
 test("Weibo extracts the target oid from fid and canonical URLs", () => {
   const parser = new WeiboParser();
   const oid = "1034:5317814823878730";

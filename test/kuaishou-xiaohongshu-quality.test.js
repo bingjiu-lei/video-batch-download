@@ -264,6 +264,18 @@ test("quality audit exposes anonymous candidates and the selection reason", () =
   assert.match(audit.selectionReason, /resolution, frame rate, bitrate, and size/);
 });
 
+test("quality audit falls back to unknown when streams carry no quality metadata", () => {
+  const parser = new XiaohongshuParser();
+  const streams = parser._normalizeAvailableStreams([
+    { url: "https://sns-video.xhscdn.com/origin.mp4", source: "origin-video-key" },
+  ], "https://www.xiaohongshu.com/");
+  const audit = parser._buildQualityAudit(streams, streams[0]);
+
+  assert.deepEqual(audit.advertisedQualities, ["unknown"]);
+  assert.deepEqual(audit.accessibleQualities, ["unknown"]);
+  assert.equal(audit.selectedQuality, "unknown");
+});
+
 test("Xiaohongshu temporary feed API failures stay retryable", () => {
   const busy = classifyXiaohongshuFeedApiError("系统繁忙，请稍后再试");
   assert.equal(busy.code, "PLATFORM_API_ERROR");

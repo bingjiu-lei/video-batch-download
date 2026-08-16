@@ -221,19 +221,20 @@ export class WeiboParser extends PlatformParser {
       const accessibleQualities = [...new Set(candidates.map((candidate) =>
         candidate.label || (candidate.quality ? `${candidate.quality}P` : null)
       ).filter(Boolean))];
+      const cleanedText = this._stripHtml(playInfo?.text);
 
       return {
         platform: WeiboParser.getPlatformName(),
         sourceUrl: url,
         canonicalUrl,
         videoId: targetOid,
-        title: playInfo?.text?.trim() || playInfo?.title?.trim() || pageTitle || "",
+        title: cleanedText?.replace(/\s*\n\s*/g, " ") || playInfo?.title?.trim() || pageTitle || "",
         author: {
           nickname: playInfo?.nickname ?? playInfo?.author ?? null,
           uid: authorId != null ? String(authorId) : null,
           url: authorId != null ? `https://weibo.com/u/${authorId}` : null,
         },
-        description: playInfo?.text?.trim() || null,
+        description: cleanedText,
         postTime: this._formatPostTime(playInfo?.real_date),
         duration: this._normalizeDuration(playInfo?.duration_time ?? playInfo?.duration),
         statistics: {
@@ -304,6 +305,27 @@ export class WeiboParser extends PlatformParser {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * playInfo.text is the raw post HTML: emoji arrive as inline <img> tags whose
+   * title/alt carry the "[表情]" text, and line breaks are <br>. Reduce it to
+   * readable plain text for title/description.
+   */
+  _stripHtml(value) {
+    if (typeof value !== "string") return null;
+    const text = value
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<img\b[^>]*?(?:title|alt)="([^"]*)"[^>]*\/?>/gi, "$1")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .trim();
+    return text || null;
   }
 
   _extractDimensions(url, label = "") {
