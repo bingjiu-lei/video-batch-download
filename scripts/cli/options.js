@@ -15,6 +15,7 @@ Download options:
   --page-timeout <seconds>       Page navigation timeout (default: 45)
   --media-wait <seconds>         Wait for media after navigation (default: 25)
   --download-timeout <seconds>   Total time allowed per transfer (default: 900)
+  --max-video-height <pixels>    Select only video streams at or below this height
   --no-video-output              Do not copy MP4 into item folders; keep it in .temp cache
   --clear-temp                   Delete media cache but preserve Agent review checkpoints
   --headed                       Show the browser for verification fallback
@@ -55,6 +56,7 @@ export function parseArgs(argv) {
     pageTimeoutMs: 45_000,
     mediaWaitMs: 25_000,
     downloadTimeoutMs: 900_000,
+    maxVideoHeight: null,
     headed: false,
     storageState: null,
     videoOutput: true,
@@ -90,6 +92,7 @@ export function parseArgs(argv) {
     else if (arg === "--page-timeout") options.pageTimeoutMs = parsePositiveInt(next(), arg) * 1_000;
     else if (arg === "--media-wait") options.mediaWaitMs = parsePositiveInt(next(), arg) * 1_000;
     else if (arg === "--download-timeout") options.downloadTimeoutMs = parsePositiveInt(next(), arg) * 1_000;
+    else if (arg === "--max-video-height") options.maxVideoHeight = parsePositiveInt(next(), arg);
     else if (arg === "--no-video-output") options.videoOutput = false;
     else if (arg === "--clear-temp") options.clearTemp = true;
     else if (arg === "--storage-state") options.storageState = path.resolve(next());

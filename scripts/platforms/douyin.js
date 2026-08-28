@@ -154,8 +154,9 @@ export class DouyinParser extends PlatformParser {
         });
       }
 
-      candidates.sort((a, b) => this._compareCandidates(b, a));
-      const mediaAlternatives = this._buildMediaAlternatives(candidates);
+      const selectedCandidates = this._limitCandidatesByHeight(candidates, options.maxVideoHeight);
+      selectedCandidates.sort((a, b) => this._compareCandidates(b, a));
+      const mediaAlternatives = this._buildMediaAlternatives(selectedCandidates);
       const mediaStreams = mediaAlternatives[0] ?? [];
       if (mediaStreams.length === 0) {
         throw new PlatformError("No valid Douyin media streams found", {
@@ -168,7 +169,7 @@ export class DouyinParser extends PlatformParser {
       }
 
       const availableStreams = candidates.map((candidate) => this._publicStream(candidate));
-      const selectedVideo = candidates.find((candidate) => candidate.url === mediaStreams[0]?.url);
+      const selectedVideo = selectedCandidates.find((candidate) => candidate.url === mediaStreams[0]?.url);
       const accessibleQualities = [...new Set(
         candidates
           .filter((candidate) => candidate.type !== "audio")
@@ -196,7 +197,9 @@ export class DouyinParser extends PlatformParser {
           advertisedQualities: [...advertisedQualities],
           accessibleQualities,
           selectedQuality,
-          selectionReason: "highest anonymous stream by resolution, frame rate, bitrate, then size",
+          selectionReason: options.maxVideoHeight
+            ? `highest anonymous stream at or below ${options.maxVideoHeight}p by resolution, frame rate, bitrate, then size`
+            : "highest anonymous stream by resolution, frame rate, bitrate, then size",
         },
         mediaAlternatives,
         mediaStreams,
@@ -264,6 +267,28 @@ export class DouyinParser extends PlatformParser {
 
   _extractVideoId(url) {
     return url.match(/\/(?:video|note)\/(\d+)/)?.[1] ?? null;
+  }
+
+  _limitCandidatesByHeight(candidates, maxVideoHeight) {
+    if (!Number.isInteger(maxVideoHeight) || maxVideoHeight <= 0) return candidates;
+
+    const videoCandidates = candidates.filter((candidate) => candidate.type !== "audio");
+    const knownHeightCandidates = videoCandidates.filter((candidate) => Number(candidate.height) > 0);
+    if (knownHeightCandidates.length === 0) return candidates;
+
+    const allowedVideos = knownHeightCandidates.filter((candidate) => Number(candidate.height) <= maxVideoHeight);
+    if (allowedVideos.length === 0) {
+      throw new PlatformError(`No Douyin stream is available at or below ${maxVideoHeight}p`, {
+        code: "QUALITY_LIMIT_UNAVAILABLE",
+        category: "media",
+        retryable: false,
+        permanent: false,
+        userMessage: `抖音未返回 ${maxVideoHeight}p 及以下的视频流，未下载更高分辨率源文件。`,
+      });
+    }
+
+    const allowedUrls = new Set(allowedVideos.map((candidate) => candidate.url));
+    return candidates.filter((candidate) => candidate.type === "audio" || allowedUrls.has(candidate.url));
   }
 
   _compareCandidates(a, b) {
