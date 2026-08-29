@@ -80,6 +80,131 @@ test("Xiaohongshu selects higher-resolution H265 instead of lower-resolution H26
   );
 });
 
+test("Xiaohongshu parses mediaV2 JSON and prefers its HD screencast stream", () => {
+  const parser = new XiaohongshuParser();
+  const note = {
+    video: {
+      media: {
+        stream: {
+          h264: [{
+            masterUrl: "https://sns-video.xhscdn.com/public-720.mp4",
+            width: 1280,
+            height: 720,
+            fps: 30,
+            avgBitrate: 2_000_000,
+          }],
+        },
+      },
+      mediaV2: JSON.stringify({
+        stream: {
+          h264: [{
+            master_url: "https://sns-video.xhscdn.com/media-v2-720.mp4",
+            width: 1280,
+            height: 720,
+            fps: 30,
+            avg_bitrate: 2_100_000,
+            video_codec: "h264",
+          }],
+        },
+        video: {
+          width: 1920,
+          height: 1080,
+          opaque1: {
+            hd_screencast_stream: "https://sns-video.xhscdn.com/hidden-1080.mp4",
+            default_screencast_stream: "https://sns-video.xhscdn.com/default-720.mp4",
+          },
+        },
+      }),
+    },
+  };
+
+  const streams = parser._normalizeAvailableStreams(
+    parser._collectNoteMediaCandidates(note),
+    "https://www.xiaohongshu.com/",
+  );
+
+  assert.equal(streams[0].url, "https://sns-video.xhscdn.com/hidden-1080.mp4");
+  assert.equal(streams[0].width, 1920);
+  assert.equal(streams[0].height, 1080);
+  assert.equal(streams[0].source, "media-v2-hd-screencast");
+  assert.ok(streams.some((stream) => stream.url.endsWith("media-v2-720.mp4")));
+  const defaultStream = streams.find((stream) => stream.source === "media-v2-default-screencast");
+  assert.equal(defaultStream.width, null);
+  assert.equal(defaultStream.height, null);
+});
+
+test("Xiaohongshu accepts JSON-encoded opaque screencast metadata", () => {
+  const parser = new XiaohongshuParser();
+  const note = {
+    video: {
+      mediaV2: JSON.stringify({
+        video: {
+          width: 1920,
+          height: 1080,
+          opaque1: JSON.stringify({
+            hd_screencast_stream: JSON.stringify({
+              master_url: "https://sns-video.xhscdn.com/encoded-hidden-1080.mp4",
+              video_codec: "h265",
+            }),
+          }),
+        },
+      }),
+    },
+  };
+
+  const streams = parser._normalizeAvailableStreams(
+    parser._collectNoteMediaCandidates(note),
+    "https://www.xiaohongshu.com/",
+  );
+
+  assert.equal(streams[0].url, "https://sns-video.xhscdn.com/encoded-hidden-1080.mp4");
+  assert.equal(streams[0].codec, "h265");
+});
+
+test("Xiaohongshu ignores malformed mediaV2 and keeps legacy streams", () => {
+  const parser = new XiaohongshuParser();
+  const note = {
+    video: {
+      mediaV2: "{broken",
+      media: {
+        stream: {
+          h264: [{ masterUrl: "https://sns-video.xhscdn.com/legacy.mp4", width: 1280, height: 720 }],
+        },
+      },
+    },
+  };
+
+  const candidates = parser._collectNoteMediaCandidates(note);
+  assert.equal(candidates[0].url, "https://sns-video.xhscdn.com/legacy.mp4");
+});
+
+test("Xiaohongshu treats the short edge as the quality tier and prioritizes 1080p over frame rate", () => {
+  const parser = new XiaohongshuParser();
+  const streams = parser._normalizeAvailableStreams([
+    { url: "https://sns-video.xhscdn.com/4k.mp4", width: 3840, height: 2160, fps: 25 },
+    { url: "https://sns-video.xhscdn.com/1080-25.mp4", width: 1920, height: 1080, fps: 25 },
+    { url: "https://sns-video.xhscdn.com/720-60.mp4", width: 1280, height: 720, fps: 60 },
+  ], "https://www.xiaohongshu.com/");
+
+  const limited = parser._limitStreamsByQuality(streams, 1080);
+  assert.deepEqual(limited.map((stream) => stream.url), [
+    "https://sns-video.xhscdn.com/1080-25.mp4",
+    "https://sns-video.xhscdn.com/720-60.mp4",
+  ]);
+});
+
+test("Xiaohongshu refuses to download above the requested quality tier", () => {
+  const parser = new XiaohongshuParser();
+  const streams = parser._normalizeAvailableStreams([
+    { url: "https://sns-video.xhscdn.com/4k.mp4", width: 3840, height: 2160, fps: 25 },
+  ], "https://www.xiaohongshu.com/");
+
+  assert.throws(
+    () => parser._limitStreamsByQuality(streams, 1080),
+    (error) => error.code === "QUALITY_LIMIT_UNAVAILABLE",
+  );
+});
+
 test("Xiaohongshu binds API and page state to the exact target note ID", async () => {
   const parser = new XiaohongshuParser();
   const targetNote = { noteId: "target-note", title: "target" };
@@ -111,6 +236,38 @@ test("Xiaohongshu binds API and page state to the exact target note ID", async (
     },
   });
   assert.deepEqual(await parser._extractNoteFromPage(standalonePage, "target-note"), targetNote);
+});
+
+test("Xiaohongshu parses SSR initial state from a mobile share response", () => {
+  const parser = new XiaohongshuParser();
+  const mediaV2 = JSON.stringify({
+    video: {
+      width: 1920,
+      height: 1080,
+      opaque1: { hd_screencast_stream: "https://sns-video.xhscdn.com/ssr-1080.mp4" },
+    },
+  });
+  const state = {
+    note: {
+      noteDetailMap: {
+        "mobile-note": {
+          note: { noteId: "mobile-note", type: "video", video: { mediaV2 }, optional: null },
+        },
+      },
+    },
+  };
+  const serialized = JSON.stringify(state).replace('"optional":null', '"optional":undefined');
+  const html = `<script>window.__INITIAL_STATE__=${serialized}</script>`;
+
+  const parsedState = parser._extractInitialStateFromHtml(html);
+  const note = parser._extractNoteFromState(parsedState, "mobile-note");
+  const streams = parser._normalizeAvailableStreams(
+    parser._collectNoteMediaCandidates(note),
+    "https://www.xiaohongshu.com/",
+  );
+
+  assert.equal(streams[0].url, "https://sns-video.xhscdn.com/ssr-1080.mp4");
+  assert.equal(streams[0].source, "media-v2-hd-screencast");
 });
 
 test("Xiaohongshu does not fall back to unrelated notes or media for a known target", async () => {
