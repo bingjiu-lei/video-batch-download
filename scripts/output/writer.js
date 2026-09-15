@@ -99,6 +99,7 @@ function writeOutputs(parsed, transcribeResult, mp4Info, outputDir, options = {}
     content_type: "video",
     title: parsed.title,
     description: parsed.description,
+    cover_url: parsed.coverUrl ?? null,
     author: parsed.author,
     post_time: parsed.postTime,
     duration: parsed.duration,

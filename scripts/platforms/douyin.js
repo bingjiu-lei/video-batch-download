@@ -188,6 +188,7 @@ export class DouyinParser extends PlatformParser {
         title: pageTitle,
         author: detailMeta?.author ?? { nickname: null, uid: null, url: null },
         description: detailMeta?.description ?? null,
+        coverUrl: detailMeta?.cover_url ?? null,
         postTime: detailMeta?.post_time ?? null,
         duration: detailMeta?.duration ?? null,
         statistics: detailMeta?.statistics ?? {},
@@ -519,6 +520,7 @@ export class DouyinParser extends PlatformParser {
         url: author.sec_uid ? `https://www.douyin.com/user/${author.sec_uid}` : null,
       },
       description: detail.desc ?? null,
+      cover_url: this._extractCoverUrl(detail),
       duration: (() => {
         const raw = detail.duration ?? detail.video?.duration ?? null;
         return raw != null ? Math.round(raw / 1000) : null;
@@ -534,5 +536,20 @@ export class DouyinParser extends PlatformParser {
         collect_count: stats.collect_count ?? null,
       },
     };
+  }
+
+  _extractCoverUrl(detail) {
+    const candidates = [
+      detail?.video?.origin_cover?.url_list,
+      detail?.video?.cover?.url_list,
+      detail?.video?.dynamic_cover?.url_list,
+      detail?.cover?.url_list,
+    ];
+    for (const urls of candidates) {
+      if (!Array.isArray(urls)) continue;
+      const url = urls.find((item) => typeof item === "string" && /^https?:\/\//i.test(item));
+      if (url) return url;
+    }
+    return null;
   }
 }

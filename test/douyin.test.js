@@ -55,6 +55,20 @@ test("Douyin detail collection keeps video variants and never collects music aud
   }), ["720p", "1080p"]);
 });
 
+test("Douyin detail metadata keeps the static cover before dynamic cover", () => {
+  const cover = parser._extractDetailMeta({
+    aweme_detail: {
+      video: {
+        origin_cover: { url_list: ["https://example.test/origin.jpg"] },
+        cover: { url_list: ["https://example.test/cover.jpg"] },
+        dynamic_cover: { url_list: ["https://example.test/dynamic.jpg"] },
+      },
+    },
+  });
+
+  assert.equal(cover.cover_url, "https://example.test/origin.jpg");
+});
+
 test("Douyin anonymous selection ranks resolution above currentSrc and exposes fallbacks", () => {
   const currentSrc = parser._normalizeCandidate({
     url: "https://v3.douyinvod.com/aweme/v1/play/?video_id=current",
