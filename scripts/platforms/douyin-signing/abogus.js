@@ -124,7 +124,3 @@ export function getABogus (urlParams, method = 'GET', opts = {}) {
   const codes = string1.concat(string2)
   return generateResult(codes, S4)
 }
-
-
-
-

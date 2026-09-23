@@ -55,6 +55,3 @@ export const base64OfBytes = (bytes) => {
   // Fallback for environments without btoa.
   return globalThis.Buffer.from(bytes.map(b => b & 0xFF)).toString('base64')
 }
-
-
-

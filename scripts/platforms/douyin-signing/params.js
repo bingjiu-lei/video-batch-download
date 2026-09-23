@@ -115,7 +115,3 @@ export function baseLive2Params (verifyFp, msToken) {
     msToken
   }
 }
-
-
-
-

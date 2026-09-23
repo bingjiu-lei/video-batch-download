@@ -74,7 +74,3 @@ export function sm3Hash (msg) {
   }
   return v.map(toHex32).join('')
 }
-
-
-
-
