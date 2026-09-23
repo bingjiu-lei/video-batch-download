@@ -1,5 +1,6 @@
 import { PlatformError, PlatformParser, preferPlatformError } from "./base.js";
 import { sanitizeName, itemKey, sleep, settleWithin } from "../utils/common.js";
+import { fetchSignedDouyinDetail, resolveDouyinUrl } from "./douyin-signing/detail-api.js";
 
 const URL_PATTERNS = [
   /^https?:\/\/v\.douyin\.com\//i,
@@ -19,11 +20,8 @@ export class DouyinParser extends PlatformParser {
   }
 
   async parse(browserManager, url, options) {
-    const browser = await browserManager.start();
-    const contextOptions = DouyinParser.getBrowserContextOptions(browserManager, options);
-
-    const context = await browser.newContext(contextOptions);
-    const page = await context.newPage();
+    let context = null;
+    let page = null;
     const candidates = [];
     const advertisedQualities = new Set();
     let detailStatus = null;
@@ -47,7 +45,7 @@ export class DouyinParser extends PlatformParser {
       }
     };
 
-    page.on("response", async (response) => {
+    const attachResponseListener = (pageInstance) => pageInstance.on("response", async (response) => {
       const responseUrl = response.url();
       const headers = response.headers();
       const contentType = headers["content-type"] ?? "";
@@ -90,30 +88,107 @@ export class DouyinParser extends PlatformParser {
       }
     });
 
+    const ensurePage = async () => {
+      if (page) return page;
+      const browser = await browserManager.start();
+      const contextOptions = DouyinParser.getBrowserContextOptions(browserManager, options);
+      context = await browser.newContext(contextOptions);
+      page = await context.newPage();
+      await page.addInitScript(() => {
+        try {
+          Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+        } catch {}
+      }).catch(() => {});
+      attachResponseListener(page);
+      return page;
+    };
+
+    const dismissLoginModal = async (pageInstance) => {
+      if (!pageInstance) return;
+      try {
+        await pageInstance.keyboard.press("Escape").catch(() => {});
+        const closeSelectors = [
+          ".dy-account-close",
+          '[data-e2e="close-icon"]',
+          '.login-mask-enter-done svg',
+          '.account-common-sdk-login-modal [class*="close"]',
+        ];
+        for (const selector of closeSelectors) {
+          const btn = pageInstance.locator(selector).first();
+          if (await btn.isVisible({ timeout: 150 }).catch(() => false)) {
+            await btn.click({ timeout: 300, force: true }).catch(() => {});
+            break;
+          }
+        }
+      } catch {}
+    };
+
     try {
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: options.pageTimeoutMs,
-      });
+      const resolvedUrl = await resolveDouyinUrl(url, Math.min(options.pageTimeoutMs, 15_000));
+      const targetVideoId = this._extractVideoId(resolvedUrl) ?? this._extractVideoId(url);
+      if (targetVideoId) {
+        const signedDetail = await fetchSignedDouyinDetail(targetVideoId, {
+          timeoutMs: Math.min(options.pageTimeoutMs, 15_000),
+        });
+        if (signedDetail) {
+          const signedCandidates = [];
+          this._collectMediaUrls(signedDetail, signedCandidates);
+          for (const candidate of signedCandidates) addCandidate(candidate);
+          for (const quality of this._extractAdvertisedQualities(signedDetail)) advertisedQualities.add(quality);
+          detailMeta = this._extractDetailMeta(signedDetail);
+          detailStatus = 200;
+          console.log(`[douyin] ✅ 签名直调成功 (${targetVideoId}): 捕获 ${signedCandidates.length} 个媒体候选 (免启动浏览器)`);
+        } else {
+          console.warn(`[douyin] ⚠️ 签名接口未获取到媒体数据 (${targetVideoId})，平滑降级为 Playwright 浏览器捕获...`);
+        }
+      }
+
+      let navigated = false;
+      if (candidates.length === 0) {
+        const browserPage = await ensurePage();
+        try {
+          await browserPage.goto(resolvedUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: options.pageTimeoutMs,
+          });
+          navigated = true;
+        } catch (error) {
+          // Navigation can time out after redirects or useful responses have
+          // already completed. Preserve captured candidates instead of
+          // discarding them unconditionally.
+          if (candidates.length === 0) throw error;
+        }
+      }
 
       // Wait for media responses
       const deadline = Date.now() + options.mediaWaitMs;
       let firstSeenAt = null;
+      let checkedModalAt = 0;
       while (Date.now() < deadline) {
         if (permanentError?.permanent) break;
         if (candidates.length > 0) {
           firstSeenAt ??= Date.now();
           if (Date.now() - firstSeenAt >= 2_000) break;
         }
+        if (navigated && page && Date.now() - checkedModalAt > 1_000) {
+          checkedModalAt = Date.now();
+          await dismissLoginModal(page);
+        }
         await sleep(250);
       }
 
-      const finalUrl = page.url();
-      const pageTitle = sanitizeName(await page.title().catch(() => ""));
-      const bodyText = await page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
+      const finalUrl = navigated && page ? page.url() : resolvedUrl;
+      const pageTitle = sanitizeName(
+        detailMeta?.description ?? (page ? await page.title().catch(() => "") : ""),
+      );
+      const bodyText = navigated && page
+        ? await page.locator("body").innerText({ timeout: 3_000 }).catch(() => "")
+        : "";
 
-      for (const candidate of await this._collectRuntimeMediaCandidates(page)) {
-        addCandidate(candidate);
+      if (navigated && page) {
+        for (const candidate of await this._collectRuntimeMediaCandidates(page)) {
+          addCandidate(candidate);
+        }
       }
 
       // Check for permanent failures (upgrade over earlier retryable API status)
@@ -178,7 +253,7 @@ export class DouyinParser extends PlatformParser {
       )];
       const selectedQuality = selectedVideo ? this._qualityLabel(selectedVideo) : null;
 
-      const videoId = this._extractVideoId(finalUrl) ?? itemKey(url);
+      const videoId = targetVideoId ?? this._extractVideoId(finalUrl) ?? itemKey(url);
 
       return {
         platform: DouyinParser.getPlatformName(),
@@ -206,7 +281,7 @@ export class DouyinParser extends PlatformParser {
         mediaStreams,
       };
     } finally {
-      await settleWithin(context.close(), 5_000);
+      if (context) await settleWithin(context.close(), 5_000);
     }
   }
 
@@ -274,10 +349,11 @@ export class DouyinParser extends PlatformParser {
     if (!Number.isInteger(maxVideoHeight) || maxVideoHeight <= 0) return candidates;
 
     const videoCandidates = candidates.filter((candidate) => candidate.type !== "audio");
-    const knownHeightCandidates = videoCandidates.filter((candidate) => Number(candidate.height) > 0);
+    const shortEdge = (candidate) => Math.min(Number(candidate.width) || 0, Number(candidate.height) || 0);
+    const knownHeightCandidates = videoCandidates.filter((candidate) => shortEdge(candidate) > 0);
     if (knownHeightCandidates.length === 0) return candidates;
 
-    const allowedVideos = knownHeightCandidates.filter((candidate) => Number(candidate.height) <= maxVideoHeight);
+    const allowedVideos = knownHeightCandidates.filter((candidate) => shortEdge(candidate) <= maxVideoHeight);
     if (allowedVideos.length === 0) {
       throw new PlatformError(`No Douyin stream is available at or below ${maxVideoHeight}p`, {
         code: "QUALITY_LIMIT_UNAVAILABLE",
@@ -309,7 +385,18 @@ export class DouyinParser extends PlatformParser {
   }
 
   _buildMediaAlternatives(candidates) {
-    const mergedCandidates = candidates.filter((candidate) => candidate.type === "video+audio");
+    const muxed = candidates.filter((candidate) => candidate.type === "video+audio");
+    const groupedMuxed = new Map();
+    for (const candidate of muxed) {
+      const key = [candidate.width, candidate.height, candidate.fps, candidate.bitrate, candidate.totalBytes].join("/");
+      const group = groupedMuxed.get(key) ?? [];
+      group.push(candidate);
+      groupedMuxed.set(key, group);
+    }
+    const mergedCandidates = [...groupedMuxed.values()].map((group) => ({
+      ...group[0],
+      alternativeUrls: [...new Set(group.map((candidate) => candidate.url))],
+    }));
     const dashVideos = candidates.filter((candidate) => candidate.type === "video");
     const dashAudios = candidates
       .filter((candidate) => candidate.type === "audio")
@@ -342,6 +429,7 @@ export class DouyinParser extends PlatformParser {
       label: candidate.label,
       source: candidate.source,
       totalBytes: candidate.totalBytes || null,
+      alternativeUrls: candidate.alternativeUrls,
       referer: "https://www.douyin.com/",
     };
   }

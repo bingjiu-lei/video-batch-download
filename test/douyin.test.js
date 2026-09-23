@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { PlatformError, preferPlatformError } from "../scripts/platforms/base.js";
 import { DouyinParser } from "../scripts/platforms/douyin.js";
+import { buildSignedDetailRequest, parseCookieHeader } from "../scripts/platforms/douyin-signing/detail-api.js";
+import { downloadDouyinRangeChunks } from "../scripts/media/downloader.js";
 
 const parser = new DouyinParser();
 
@@ -94,6 +99,230 @@ test("Douyin anonymous selection ranks resolution above currentSrc and exposes f
   assert.equal(alternatives[1][0].url, currentSrc.url);
   assert.equal(alternatives[0][0].type, "video+audio");
   assert.equal(alternatives[0][0].quality, 1080);
+});
+
+test("Douyin keeps same-quality CDN mirrors in one download candidate", () => {
+  const candidates = ["v3", "v9"].map((host) => parser._normalizeCandidate({
+    url: `https://${host}.douyinvod.com/video.mp4`,
+    type: "video+audio",
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    bitrate: 3_000_000,
+    totalBytes: 12_345,
+  }));
+  const alternatives = parser._buildMediaAlternatives(candidates);
+
+  assert.equal(alternatives.length, 1);
+  assert.deepEqual(alternatives[0][0].alternativeUrls, [
+    "https://v3.douyinvod.com/video.mp4",
+    "https://v9.douyinvod.com/video.mp4",
+  ]);
+});
+
+test("Douyin range downloader switches CDN after a range failure", async (t) => {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "douyin-cdn-"));
+  const output = path.join(directory, "video.part");
+  t.after(async () => fsp.rm(directory, { recursive: true, force: true }));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push(String(url));
+    if (String(url).includes("bad.douyinvod.com")) {
+      return new Response("unavailable", { status: 503 });
+    }
+    const range = options.headers.Range.match(/bytes=(\d+)-(\d+)/);
+    const start = Number(range[1]);
+    const end = Number(range[2]);
+    return new Response(Buffer.alloc(end - start + 1, 7), {
+      status: 206,
+      headers: { "content-range": `bytes ${start}-${end}/4` },
+    });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const downloaded = await downloadDouyinRangeChunks({
+    url: "https://bad.douyinvod.com/video.mp4",
+    alternativeUrls: [
+      "https://bad.douyinvod.com/video.mp4",
+      "https://good.douyinvod.com/video.mp4",
+    ],
+    totalBytes: 4,
+  }, output, {}, new AbortController());
+
+  assert.equal(downloaded, true);
+  assert.equal((await fsp.readFile(output)).length, 4);
+  assert.deepEqual(calls, [
+    "https://bad.douyinvod.com/video.mp4",
+    "https://good.douyinvod.com/video.mp4",
+  ]);
+});
+
+test("Douyin range downloader switches CDN when one request hangs", async (t) => {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "douyin-cdn-timeout-"));
+  const output = path.join(directory, "video.part");
+  t.after(async () => fsp.rm(directory, { recursive: true, force: true }));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push(String(url));
+    if (String(url).includes("hung.douyinvod.com")) {
+      return await new Promise((_, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      });
+    }
+    return new Response(Buffer.alloc(4, 9), {
+      status: 206,
+      headers: { "content-range": "bytes 0-3/4" },
+    });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const downloaded = await downloadDouyinRangeChunks({
+    url: "https://hung.douyinvod.com/video.mp4",
+    alternativeUrls: ["https://good.douyinvod.com/video.mp4"],
+    totalBytes: 4,
+  }, output, {}, new AbortController(), { rangeRequestTimeoutMs: 1_000 });
+
+  assert.equal(downloaded, true);
+  assert.equal((await fsp.readFile(output)).length, 4);
+  assert.deepEqual(calls, [
+    "https://hung.douyinvod.com/video.mp4",
+    "https://good.douyinvod.com/video.mp4",
+  ]);
+});
+
+test("Douyin range downloader cancels a stalled response body before switching CDN", async (t) => {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "douyin-cdn-body-timeout-"));
+  const output = path.join(directory, "video.part");
+  t.after(async () => fsp.rm(directory, { recursive: true, force: true }));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes("body-hung.douyinvod.com")) {
+      return new Response(new ReadableStream({
+        pull() {},
+        cancel() {},
+      }), {
+        status: 206,
+        headers: { "content-range": "bytes 0-3/4" },
+      });
+    }
+    return new Response(Buffer.alloc(4, 5), {
+      status: 206,
+      headers: { "content-range": "bytes 0-3/4" },
+    });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const downloaded = await downloadDouyinRangeChunks({
+    url: "https://body-hung.douyinvod.com/video.mp4",
+    alternativeUrls: ["https://good.douyinvod.com/video.mp4"],
+    totalBytes: 4,
+  }, output, {}, new AbortController(), { rangeRequestTimeoutMs: 1_000 });
+
+  assert.equal(downloaded, true);
+  assert.equal((await fsp.readFile(output)).length, 4);
+  assert.deepEqual(calls, [
+    "https://body-hung.douyinvod.com/video.mp4",
+    "https://good.douyinvod.com/video.mp4",
+  ]);
+});
+
+test("Douyin signed detail request carries the new UIFID web signature alongside a_bogus", () => {
+  const request = buildSignedDetailRequest(
+    "7688541667254652200",
+    "UIFID_TEMP=test-uifid; sessionid=test-session",
+    1_790_000_000,
+  );
+  const parsed = new URL(request.url);
+  assert.ok(parsed.searchParams.get("a_bogus"));
+  assert.equal(parsed.searchParams.get("uifid"), "test-uifid");
+  assert.equal(parsed.searchParams.get("timestamp"), "1790000000");
+  assert.ok(parsed.searchParams.get("x-secsdk-web-signature"));
+  assert.equal(request.headers.uifid, "test-uifid");
+  assert.equal(
+    request.headers["x-secsdk-web-signature"],
+    parsed.searchParams.get("x-secsdk-web-signature"),
+  );
+  assert.deepEqual(parseCookieHeader("a=1; b=two=parts"), { a: "1", b: "two=parts" });
+});
+
+test("Douyin signed detail parsing does not start Playwright when media is already available", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalCookie = process.env.DOUYIN_COOKIE;
+  process.env.DOUYIN_COOKIE = "UIFID_TEMP=test-uifid";
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    status_code: 0,
+    aweme_detail: {
+      aweme_id: "1234567890123456789",
+      desc: "签名接口视频",
+      video: {
+        width: 1920,
+        height: 1080,
+        bit_rate: [{
+          bit_rate: 1_000_000,
+          play_addr: {
+            width: 1920,
+            height: 1080,
+            data_size: 10_000,
+            url_list: ["https://v3.douyinvod.com/aweme/v1/play/?video_id=signed"],
+          },
+        }],
+      },
+    },
+  }), { status: 200 });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    if (originalCookie == null) delete process.env.DOUYIN_COOKIE;
+    else process.env.DOUYIN_COOKIE = originalCookie;
+  });
+  let browserStarts = 0;
+  const parsed = await new DouyinParser().parse({
+    start: async () => {
+      browserStarts += 1;
+      throw new Error("browser should not start");
+    },
+  }, "https://www.douyin.com/video/1234567890123456789", {
+    pageTimeoutMs: 1_000,
+    mediaWaitMs: 0,
+    maxVideoHeight: 1080,
+  });
+
+  assert.equal(browserStarts, 0);
+  assert.equal(parsed.mediaStreams[0].url, "https://v3.douyinvod.com/aweme/v1/play/?video_id=signed");
+});
+
+test("Douyin 1080p limit uses the short edge and prefers 60fps at equal resolution", () => {
+  const candidates = [
+    parser._normalizeCandidate({
+      url: "https://v3.douyinvod.com/1080-30.mp4",
+      type: "video+audio",
+      width: 1080,
+      height: 1920,
+      fps: 30,
+    }),
+    parser._normalizeCandidate({
+      url: "https://v3.douyinvod.com/1080-60.mp4",
+      type: "video+audio",
+      width: 1080,
+      height: 1920,
+      fps: 60,
+    }),
+    parser._normalizeCandidate({
+      url: "https://v3.douyinvod.com/2160-60.mp4",
+      type: "video+audio",
+      width: 2160,
+      height: 3840,
+      fps: 60,
+    }),
+  ];
+  const limited = parser._limitCandidatesByHeight(candidates, 1080)
+    .sort((a, b) => parser._compareCandidates(b, a));
+  assert.equal(limited.length, 2);
+  assert.equal(limited[0].fps, 60);
+  assert.equal(limited[0].quality, 1080);
 });
 
 test("Douyin selection supports DASH pairs and safely typed direct play URLs", () => {

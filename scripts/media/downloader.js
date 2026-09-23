@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { Readable } from "node:stream";
-import { finished } from "node:stream/promises";
+import { pipeline } from "node:stream/promises";
 
 import { ProcessingError, normalizeError, sanitizeCandidateFailure } from "../core/errors.js";
 import { QUALITY_SELECTION_VERSION } from "../core/policies.js";
@@ -78,6 +77,137 @@ function isFatalCandidateError(error) {
   return !error.retryable || error.retryScope === "none" || ["environment", "output"].includes(error.category);
 }
 
+export async function downloadDouyinRangeChunks(stream, partialPath, headers, controller, options = {}) {
+  const totalBytes = Number(stream.totalBytes ?? 0);
+  if (!/(douyinvod\.com|aweme\/v1\/play)/i.test(stream.url) || totalBytes <= 0) return false;
+  const chunkSize = options.chunkSize ?? 1024 * 1024;
+  const rangeRequestTimeoutMs = Math.max(1_000, Number(options.rangeRequestTimeoutMs ?? 15_000));
+  const urls = [...new Set([
+    stream.url,
+    ...(Array.isArray(stream.alternativeUrls) ? stream.alternativeUrls : []),
+  ].filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)))];
+  const health = new Map(urls.map((url, index) => [url, {
+    index,
+    failures: 0,
+    successes: 0,
+    latencyMs: Number.POSITIVE_INFINITY,
+  }]));
+  const orderedUrls = (preferredIndex = 0) => [...urls].sort((left, right) => {
+    const a = health.get(left);
+    const b = health.get(right);
+    return a.failures - b.failures
+      || b.successes - a.successes
+      || a.latencyMs - b.latencyMs
+      || ((a.index - preferredIndex + urls.length) % urls.length)
+        - ((b.index - preferredIndex + urls.length) % urls.length);
+  });
+  const file = await fsp.open(partialPath, "wx");
+  try {
+    const ranges = [];
+    for (let start = 0; start < totalBytes; start += chunkSize) {
+      ranges.push({ start, end: Math.min(totalBytes - 1, start + chunkSize - 1) });
+    }
+    const downloadRange = async ({ start, end }, rangeIndex) => {
+      let lastError = null;
+      for (const url of orderedUrls(rangeIndex % urls.length)) {
+        const startedAt = Date.now();
+        const rangeController = new AbortController();
+        let responseBody = null;
+        let cancelResponseBody = () => responseBody?.cancel().catch(() => {});
+        let timedOut = false;
+        const parentAbort = () => rangeController.abort(controller.signal.reason);
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          cancelResponseBody();
+          rangeController.abort(new Error("Douyin CDN range request timeout"));
+        }, rangeRequestTimeoutMs);
+        controller.signal.addEventListener("abort", parentAbort, { once: true });
+        try {
+          const response = await fetch(url, {
+            redirect: "follow",
+            signal: rangeController.signal,
+            headers: { ...headers, Range: `bytes=${start}-${end}` },
+          });
+          if (response.status !== 206 || !response.body) {
+            throw mediaError(`Douyin range request returned HTTP ${response.status}`, {
+              code: "MEDIA_HTTP_STATUS",
+              category: "network",
+              details: { httpStatus: response.status, rangeStart: start, rangeEnd: end },
+            });
+          }
+          responseBody = response.body;
+          const contentRange = response.headers.get("content-range") ?? "";
+          const matched = contentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+)/i);
+          if (!matched || Number(matched[1]) !== start || Number(matched[2]) !== end || Number(matched[3]) !== totalBytes) {
+            throw mediaError(`Unexpected Douyin content range: ${contentRange || "missing"}`, {
+              code: "MEDIA_INCOMPLETE",
+              category: "network",
+            });
+          }
+          const reader = response.body.getReader();
+          cancelResponseBody = () => reader.cancel().catch(() => {});
+          const chunks = [];
+          let receivedBytes = 0;
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const chunk = Buffer.from(value);
+              chunks.push(chunk);
+              receivedBytes += chunk.length;
+            }
+          } finally {
+            reader.releaseLock();
+          }
+          const bytes = Buffer.concat(chunks, receivedBytes);
+          if (bytes.length !== end - start + 1) {
+            throw mediaError(`Incomplete Douyin range: expected ${end - start + 1}, received ${bytes.length}`, {
+              code: "MEDIA_INCOMPLETE",
+              category: "network",
+            });
+          }
+          await file.write(bytes, 0, bytes.length, start);
+          const state = health.get(url);
+          const elapsed = Math.max(1, Date.now() - startedAt);
+          state.successes += 1;
+          state.latencyMs = Number.isFinite(state.latencyMs)
+            ? Math.round((state.latencyMs * 3 + elapsed) / 4)
+            : elapsed;
+          return;
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          const state = health.get(url);
+          state.failures += 1;
+          lastError = error instanceof ProcessingError ? error : mediaError(
+            timedOut ? "Douyin CDN range request timed out" : `Douyin CDN range request failed: ${error.message}`,
+            {
+              code: timedOut ? "MEDIA_CDN_TIMEOUT" : "MEDIA_NETWORK_ERROR",
+              category: "network",
+              details: { rangeStart: start, rangeEnd: end },
+            },
+          );
+        } finally {
+          clearTimeout(timeout);
+          controller.signal.removeEventListener("abort", parentAbort);
+        }
+      }
+      throw lastError ?? mediaError("No usable Douyin CDN URL", {
+        code: "MEDIA_NETWORK_ERROR",
+        category: "network",
+      });
+    };
+    const concurrency = options.concurrency ?? 8;
+    for (let index = 0; index < ranges.length; index += concurrency) {
+      const pending = ranges.slice(index, index + concurrency).map((range, offset) => downloadRange(range, index + offset));
+      await Promise.all(pending);
+    }
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+  return true;
+}
+
 async function downloadSingleStream(stream, mediaKey, suffix, outputDir, timeoutMs) {
   const tmpDir = getTempDir(outputDir);
   await fsp.mkdir(tmpDir, { recursive: true });
@@ -98,15 +228,30 @@ async function downloadSingleStream(stream, mediaKey, suffix, outputDir, timeout
 
   try {
     const referer = stream.referer ?? "https://www.google.com/";
+    const requestHeaders = {
+      Referer: referer,
+      "User-Agent": USER_AGENT,
+      Accept: "video/mp4,video/*;q=0.9,*/*;q=0.8",
+      ...(stream.headers ?? {}),
+    };
+    const ranged = await downloadDouyinRangeChunks(stream, partialPath, requestHeaders, controller);
+    if (ranged) {
+      const stat = await fsp.stat(partialPath);
+      if (!(await isValidMp4(partialPath))) {
+        throw mediaError("Downloaded file is not a valid MP4/M4S container", {
+          code: "MEDIA_CONTAINER_INVALID",
+          category: "media",
+          userMessage: "下载到的文件不是有效视频容器，已尝试换用其他候选。",
+        });
+      }
+      await fsp.rm(finalPath, { force: true });
+      await fsp.rename(partialPath, finalPath);
+      return { filePath: finalPath, bytes: stat.size, skipped: false };
+    }
     const response = await fetch(stream.url, {
       redirect: "follow",
       signal: controller.signal,
-      headers: {
-        Referer: referer,
-        "User-Agent": USER_AGENT,
-        Accept: "video/mp4,video/*;q=0.9,*/*;q=0.8",
-        ...(stream.headers ?? {}),
-      },
+      headers: requestHeaders,
     });
 
     if (!response.ok || !response.body) {
@@ -119,8 +264,7 @@ async function downloadSingleStream(stream, mediaKey, suffix, outputDir, timeout
     }
 
     const output = fs.createWriteStream(partialPath, { flags: "wx" });
-    const readable = Readable.fromWeb(response.body);
-    await finished(readable.pipe(output));
+    await pipeline(response.body, output);
 
     const stat = await fsp.stat(partialPath);
     const expected = expectedResponseBytes(response);
