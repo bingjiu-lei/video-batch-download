@@ -7,6 +7,7 @@ import test from "node:test";
 import { PlatformError, preferPlatformError } from "../scripts/platforms/base.js";
 import { DouyinParser } from "../scripts/platforms/douyin.js";
 import { buildSignedDetailRequest, parseCookieHeader } from "../scripts/platforms/douyin-signing/detail-api.js";
+import { getABogus } from "../scripts/platforms/douyin-signing/abogus.js";
 import { downloadDouyinRangeChunks } from "../scripts/media/downloader.js";
 
 const parser = new DouyinParser();
@@ -101,7 +102,33 @@ test("Douyin anonymous selection ranks resolution above currentSrc and exposes f
   assert.equal(alternatives[0][0].quality, 1080);
 });
 
-test("Douyin keeps same-quality CDN mirrors in one download candidate", () => {
+test("Douyin keeps only mirrors from the same source url_list", () => {
+  const collected = [];
+  parser._collectMediaUrls({
+    aweme_detail: {
+      video: {
+        play_addr: {
+          width: 1920,
+          height: 1080,
+          data_size: 12_345,
+          url_list: [
+            "https://v3.douyinvod.com/video.mp4",
+            "https://v9.douyinvod.com/video.mp4",
+          ],
+        },
+      },
+    },
+  }, collected);
+  const alternatives = parser._buildMediaAlternatives(collected.map((item) => parser._normalizeCandidate(item)));
+
+  assert.equal(alternatives.length, 1);
+  assert.deepEqual(alternatives[0][0].alternativeUrls, [
+    "https://v3.douyinvod.com/video.mp4",
+    "https://v9.douyinvod.com/video.mp4",
+  ]);
+});
+
+test("Douyin does not merge independent same-metadata media objects", () => {
   const candidates = ["v3", "v9"].map((host) => parser._normalizeCandidate({
     url: `https://${host}.douyinvod.com/video.mp4`,
     type: "video+audio",
@@ -111,13 +138,16 @@ test("Douyin keeps same-quality CDN mirrors in one download candidate", () => {
     bitrate: 3_000_000,
     totalBytes: 12_345,
   }));
-  const alternatives = parser._buildMediaAlternatives(candidates);
+  assert.equal(parser._buildMediaAlternatives(candidates).length, 2);
+});
 
-  assert.equal(alternatives.length, 1);
-  assert.deepEqual(alternatives[0][0].alternativeUrls, [
-    "https://v3.douyinvod.com/video.mp4",
-    "https://v9.douyinvod.com/video.mp4",
-  ]);
+test("Douyin a_bogus keeps production random entropy", () => {
+  const params = "device_platform=webapp&aid=6383&aweme_id=1234567890123456789";
+  const fixed = { startTime: 1_790_000_000_000, endTime: 1_790_000_000_005 };
+  const low = getABogus(params, "GET", { ...fixed, random1: 1000, random2: 2000, random3: 3000 });
+  const high = getABogus(params, "GET", { ...fixed, random1: 9000, random2: 8000, random3: 7000 });
+  assert.notEqual(low, high);
+  assert.equal(low, getABogus(params, "GET", { ...fixed, random1: 1000, random2: 2000, random3: 3000 }));
 });
 
 test("Douyin range downloader switches CDN after a range failure", async (t) => {

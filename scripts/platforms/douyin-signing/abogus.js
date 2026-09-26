@@ -113,9 +113,13 @@ function generateResult (codes, table) {
 // string (same bytes that go in the final URL). opts lets tests pin
 // time/random; production leaves them undefined for live values.
 export function getABogus (urlParams, method = 'GET', opts = {}) {
-  const r1 = opts.random1 ?? Math.random()
-  const r2 = opts.random2 ?? Math.random()
-  const r3 = opts.random3 ?? Math.random()
+  // randomList expects an integer-like value. Passing Math.random() directly
+  // truncates almost every production sample to zero and makes signatures far
+  // more deterministic than the browser implementation.
+  const random = typeof opts.random === "function" ? opts.random : Math.random
+  const r1 = opts.random1 ?? random() * 10000
+  const r2 = opts.random2 ?? random() * 10000
+  const r3 = opts.random3 ?? random() * 10000
   const startTime = opts.startTime ?? Date.now()
   const endTime = opts.endTime ?? (startTime + Math.floor(Math.random() * 5) + 4)
 

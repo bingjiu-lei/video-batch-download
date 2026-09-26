@@ -386,22 +386,14 @@ export class DouyinParser extends PlatformParser {
 
   _buildMediaAlternatives(candidates) {
     const muxed = candidates.filter((candidate) => candidate.type === "video+audio");
-    const groupedMuxed = new Map();
-    for (const candidate of muxed) {
-      const key = [candidate.width, candidate.height, candidate.fps, candidate.bitrate, candidate.totalBytes].join("/");
-      const group = groupedMuxed.get(key) ?? [];
-      group.push(candidate);
-      groupedMuxed.set(key, group);
-    }
-    const mergedCandidates = [...groupedMuxed.values()].map((group) => ({
-      ...group[0],
-      alternativeUrls: [...new Set(group.map((candidate) => candidate.url))],
-    }));
     const dashVideos = candidates.filter((candidate) => candidate.type === "video");
     const dashAudios = candidates
       .filter((candidate) => candidate.type === "audio")
       .sort((a, b) => this._compareCandidates(b, a));
-    const alternatives = mergedCandidates.map((candidate) => [this._stream(candidate)]);
+    // A CDN mirror set is trustworthy only when Douyin returned the URLs in
+    // the same source url_list. Equal dimensions/bitrate/size are not enough
+    // to prove that two independent media objects are byte-identical.
+    const alternatives = muxed.map((candidate) => [this._stream(candidate)]);
 
     for (const video of dashVideos) {
       const audio = dashAudios[0] ?? this._normalizeCandidate(this._deriveDashAudioCandidate(video));
@@ -503,16 +495,17 @@ export class DouyinParser extends PlatformParser {
         label: node.gear_name ?? node.quality_label ?? node.ratio ?? inherited.label ?? null,
         totalBytes: Number(node.data_size ?? node.file_size ?? inherited.totalBytes ?? 0),
       };
-      const urls = Array.isArray(node.url_list) ? node.url_list : [];
-      for (const rawUrl of urls) {
-        if (typeof rawUrl !== "string") continue;
-        const url = rawUrl.replaceAll("\\u0026", "&");
-        if (!/^https?:\/\//i.test(url) || !/(douyinvod\.com|aweme\/v1\/play)/i.test(url)) continue;
+      const urls = [...new Set((Array.isArray(node.url_list) ? node.url_list : [])
+        .filter((rawUrl) => typeof rawUrl === "string")
+        .map((rawUrl) => rawUrl.replaceAll("\\u0026", "&"))
+        .filter((url) => /^https?:\/\//i.test(url) && /(douyinvod\.com|aweme\/v1\/play)/i.test(url)))];
+      if (urls.length) {
+        const url = urls[0];
         const pathText = path.join(".");
         const type = this._isDashAudioUrl(url) || /audio/i.test(pathText)
           ? "audio"
           : this._isDashVideoUrl(url) ? "video" : "video+audio";
-        results.push({ url, type, source: "detail-json", ...metadata });
+        results.push({ url, alternativeUrls: urls, type, source: "detail-json", ...metadata });
       }
       for (const [key, child] of Object.entries(node)) {
         if (key === "url_list") continue;
@@ -564,6 +557,9 @@ export class DouyinParser extends PlatformParser {
       label: candidate.label ? String(candidate.label) : null,
       source: candidate.source ?? "unknown",
       totalBytes: Number(candidate.totalBytes ?? 0),
+      alternativeUrls: [...new Set((candidate.alternativeUrls ?? [url])
+        .filter((item) => typeof item === "string" && /^https?:\/\//i.test(item))
+        .map((item) => item.replaceAll("\\u0026", "&")))],
       referer: "https://www.douyin.com/",
     };
   }
@@ -582,6 +578,7 @@ export class DouyinParser extends PlatformParser {
       label: candidate.label,
       source: candidate.source,
       totalBytes: candidate.totalBytes || null,
+      alternativeUrls: candidate.alternativeUrls,
       referer: candidate.referer,
     };
   }

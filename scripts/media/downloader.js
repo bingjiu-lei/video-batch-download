@@ -199,7 +199,9 @@ export async function downloadDouyinRangeChunks(stream, partialPath, headers, co
     const concurrency = options.concurrency ?? 8;
     for (let index = 0; index < ranges.length; index += concurrency) {
       const pending = ranges.slice(index, index + concurrency).map((range, offset) => downloadRange(range, index + offset));
-      await Promise.all(pending);
+      const settled = await Promise.allSettled(pending);
+      const rejected = settled.find((result) => result.status === "rejected");
+      if (rejected) throw rejected.reason;
     }
     await file.sync();
   } finally {
@@ -248,45 +250,60 @@ async function downloadSingleStream(stream, mediaKey, suffix, outputDir, timeout
       await fsp.rename(partialPath, finalPath);
       return { filePath: finalPath, bytes: stat.size, skipped: false };
     }
-    const response = await fetch(stream.url, {
-      redirect: "follow",
-      signal: controller.signal,
-      headers: requestHeaders,
+    const directUrls = [...new Set([
+      stream.url,
+      ...(Array.isArray(stream.alternativeUrls) ? stream.alternativeUrls : []),
+    ].filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)))];
+    let lastDirectError = null;
+    for (const url of directUrls) {
+      await fsp.rm(partialPath, { force: true }).catch(() => {});
+      try {
+        const response = await fetch(url, {
+          redirect: "follow",
+          signal: controller.signal,
+          headers: requestHeaders,
+        });
+        if (!response.ok || !response.body) {
+          await response.body?.cancel().catch(() => {});
+          throw mediaError(`Media request returned HTTP ${response.status}`, {
+            code: "MEDIA_HTTP_STATUS",
+            category: "network",
+            details: { httpStatus: response.status, url },
+            userMessage: `媒体地址返回 HTTP ${response.status}，已尝试同组备用地址。`,
+          });
+        }
+        const output = fs.createWriteStream(partialPath, { flags: "wx" });
+        await pipeline(response.body, output);
+        const stat = await fsp.stat(partialPath);
+        const expected = expectedResponseBytes(response);
+        if (expected > 0 && stat.size !== expected) {
+          throw mediaError(`Incomplete media: expected ${expected} bytes, received ${stat.size}`, {
+            code: "MEDIA_INCOMPLETE",
+            category: "network",
+            details: { expectedBytes: expected, receivedBytes: stat.size, url },
+            userMessage: "媒体下载不完整，已尝试同组备用地址。",
+          });
+        }
+        if (!(await isValidMp4(partialPath))) {
+          throw mediaError("Downloaded file is not a valid MP4/M4S container", {
+            code: "MEDIA_CONTAINER_INVALID",
+            category: "media",
+            details: { url },
+            userMessage: "下载到的文件不是有效视频容器，已尝试同组备用地址。",
+          });
+        }
+        await fsp.rm(finalPath, { force: true });
+        await fsp.rename(partialPath, finalPath);
+        return { filePath: finalPath, bytes: stat.size, skipped: false };
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        lastDirectError = error;
+      }
+    }
+    throw lastDirectError ?? mediaError("No usable media URL", {
+      code: "MEDIA_NETWORK_ERROR",
+      category: "network",
     });
-
-    if (!response.ok || !response.body) {
-      throw mediaError(`Media request returned HTTP ${response.status}`, {
-        code: "MEDIA_HTTP_STATUS",
-        category: "network",
-        details: { httpStatus: response.status },
-        userMessage: `媒体地址返回 HTTP ${response.status}，已尝试换用其他候选或重新解析。`,
-      });
-    }
-
-    const output = fs.createWriteStream(partialPath, { flags: "wx" });
-    await pipeline(response.body, output);
-
-    const stat = await fsp.stat(partialPath);
-    const expected = expectedResponseBytes(response);
-    if (expected > 0 && stat.size !== expected) {
-      throw mediaError(`Incomplete media: expected ${expected} bytes, received ${stat.size}`, {
-        code: "MEDIA_INCOMPLETE",
-        category: "network",
-        details: { expectedBytes: expected, receivedBytes: stat.size },
-        userMessage: "媒体下载不完整，已尝试换用其他候选或稍后重试。",
-      });
-    }
-    if (!(await isValidMp4(partialPath))) {
-      throw mediaError("Downloaded file is not a valid MP4/M4S container", {
-        code: "MEDIA_CONTAINER_INVALID",
-        category: "media",
-        userMessage: "下载到的文件不是有效视频容器，已尝试换用其他候选。",
-      });
-    }
-
-    await fsp.rm(finalPath, { force: true });
-    await fsp.rename(partialPath, finalPath);
-    return { filePath: finalPath, bytes: stat.size, skipped: false };
   } catch (error) {
     await fsp.rm(partialPath, { force: true }).catch(() => {});
     throw classifyDownloadError(error);
