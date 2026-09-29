@@ -20,6 +20,8 @@ test("parseArgs preserves download and transcription defaults", () => {
   assert.equal(options.deviceExplicit, false);
   assert.equal(options.computeTypeExplicit, false);
   assert.equal(options.videoOutput, true);
+  assert.equal(options.maxVideoHeight, null);
+  assert.equal(options.maxSizeMb, null);
   assert.deepEqual(options.disabledPlatforms, []);
   assert.deepEqual(options.texts, []);
 });
@@ -58,6 +60,7 @@ test("parseArgs converts durations, repeatable platform values, and positional t
     "--max-attempts", "0",
     "--disable-platform", "weibo,kuaishou",
     "--disable-platform", "douyin",
+    "--max-size-mb", "1200",
     "--no-video-output",
     "--no-transcribe",
     "share text",
@@ -68,10 +71,14 @@ test("parseArgs converts durations, repeatable platform values, and positional t
   assert.equal(options.downloadTimeoutMs, 90_000);
   assert.equal(options.transcribeTimeoutMs, 30_000);
   assert.equal(options.maxAttempts, 0);
+  assert.equal(options.maxSizeMb, 1200);
   assert.deepEqual(options.disabledPlatforms, ["weibo", "kuaishou", "douyin"]);
   assert.equal(options.videoOutput, false);
   assert.equal(options.transcribe, false);
   assert.deepEqual(options.texts, ["share text"]);
+
+  const aliasOptions = parseArgs(["--max-video-size-mb", "800"]);
+  assert.equal(aliasOptions.maxSizeMb, 800);
 });
 
 test("parsePositiveInt and parseArgs preserve validation messages", () => {

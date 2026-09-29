@@ -229,7 +229,8 @@ export class DouyinParser extends PlatformParser {
         });
       }
 
-      const selectedCandidates = this._limitCandidatesByHeight(candidates, options.maxVideoHeight);
+      let selectedCandidates = this._limitCandidatesByHeight(candidates, options.maxVideoHeight);
+      selectedCandidates = this._limitCandidatesBySize(selectedCandidates, options.maxSizeMb, detailMeta?.duration);
       selectedCandidates.sort((a, b) => this._compareCandidates(b, a));
       const mediaAlternatives = this._buildMediaAlternatives(selectedCandidates);
       const mediaStreams = mediaAlternatives[0] ?? [];
@@ -273,9 +274,13 @@ export class DouyinParser extends PlatformParser {
           advertisedQualities: [...advertisedQualities],
           accessibleQualities,
           selectedQuality,
-          selectionReason: options.maxVideoHeight
-            ? `highest anonymous stream at or below ${options.maxVideoHeight}p by resolution, frame rate, bitrate, then size`
-            : "highest anonymous stream by resolution, frame rate, bitrate, then size",
+          selectionReason: options.maxVideoHeight && options.maxSizeMb
+            ? `highest anonymous stream at or below ${options.maxVideoHeight}p and ${options.maxSizeMb}MB by resolution, frame rate, bitrate, then size`
+            : options.maxVideoHeight
+              ? `highest anonymous stream at or below ${options.maxVideoHeight}p by resolution, frame rate, bitrate, then size`
+              : options.maxSizeMb
+                ? `highest anonymous stream at or below ${options.maxSizeMb}MB by resolution, frame rate, bitrate, then size`
+                : "highest anonymous stream by resolution, frame rate, bitrate, then size",
         },
         mediaAlternatives,
         mediaStreams,
@@ -362,6 +367,46 @@ export class DouyinParser extends PlatformParser {
         permanent: false,
         userMessage: `抖音未返回 ${maxVideoHeight}p 及以下的视频流，未下载更高分辨率源文件。`,
       });
+    }
+
+    const allowedUrls = new Set(allowedVideos.map((candidate) => candidate.url));
+    return candidates.filter((candidate) => candidate.type === "audio" || allowedUrls.has(candidate.url));
+  }
+
+  _limitCandidatesBySize(candidates, maxSizeMb, durationSec) {
+    if (!Number.isInteger(maxSizeMb) || maxSizeMb <= 0) return candidates;
+
+    const maxSizeBytes = maxSizeMb * 1024 * 1024;
+    const candidateSize = (candidate) => {
+      const explicit = Number(candidate.totalBytes);
+      if (Number.isFinite(explicit) && explicit > 0) return explicit;
+      const bitrate = Number(candidate.bitrate);
+      const duration = Number(durationSec);
+      if (Number.isFinite(bitrate) && bitrate > 0 && Number.isFinite(duration) && duration > 0) {
+        return Math.round((bitrate * duration) / 8);
+      }
+      return 0;
+    };
+
+    const videoCandidates = candidates.filter((candidate) => candidate.type !== "audio");
+    if (videoCandidates.length === 0) return candidates;
+
+    const withinBudget = videoCandidates.filter((candidate) => {
+      const size = candidateSize(candidate);
+      return size > 0 && size <= maxSizeBytes;
+    });
+
+    let allowedVideos;
+    if (withinBudget.length > 0) {
+      allowedVideos = withinBudget;
+    } else {
+      const sizedCandidates = videoCandidates.filter((c) => candidateSize(c) > 0);
+      if (sizedCandidates.length > 0) {
+        const minSize = Math.min(...sizedCandidates.map(candidateSize));
+        allowedVideos = sizedCandidates.filter((c) => candidateSize(c) === minSize);
+      } else {
+        allowedVideos = videoCandidates;
+      }
     }
 
     const allowedUrls = new Set(allowedVideos.map((candidate) => candidate.url));

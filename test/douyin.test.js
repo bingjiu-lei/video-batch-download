@@ -462,3 +462,88 @@ test("Douyin permanent detail errors are not overwritten by later retryable stat
   assert.equal(permanentError.code, "CONTENT_DELETED");
   assert.equal(permanentError.permanent, true);
 });
+
+test("Douyin size budget keeps 4K when within limit and steps down when exceeded", () => {
+  const stream4k = parser._normalizeCandidate({
+    url: "https://v3.douyinvod.com/4k.mp4",
+    type: "video+audio",
+    width: 3840,
+    height: 2160,
+    bitrate: 4_000_000,
+    totalBytes: 400 * 1024 * 1024,
+  });
+  const stream1080p = parser._normalizeCandidate({
+    url: "https://v3.douyinvod.com/1080p.mp4",
+    type: "video+audio",
+    width: 1920,
+    height: 1080,
+    bitrate: 2_000_000,
+    totalBytes: 200 * 1024 * 1024,
+  });
+  const stream720p = parser._normalizeCandidate({
+    url: "https://v3.douyinvod.com/720p.mp4",
+    type: "video+audio",
+    width: 1280,
+    height: 720,
+    bitrate: 1_000_000,
+    totalBytes: 100 * 1024 * 1024,
+  });
+
+  // 1. Within 1200MB budget: 4K is kept
+  const withinLimit = parser._limitCandidatesBySize([stream4k, stream1080p, stream720p], 1200);
+  assert.equal(withinLimit.length, 3);
+  withinLimit.sort((a, b) => parser._compareCandidates(b, a));
+  assert.equal(withinLimit[0].url, stream4k.url);
+
+  // 2. 4K exceeds budget (e.g. max 300MB): drops 4K, keeps 1080p and 720p
+  const limitedTo300 = parser._limitCandidatesBySize([stream4k, stream1080p, stream720p], 300);
+  assert.equal(limitedTo300.length, 2);
+  limitedTo300.sort((a, b) => parser._compareCandidates(b, a));
+  assert.equal(limitedTo300[0].url, stream1080p.url);
+
+  // 3. Fallback when all streams exceed budget: steps down to minimum size without failing
+  const huge4k = parser._normalizeCandidate({
+    url: "https://v3.douyinvod.com/huge4k.mp4",
+    type: "video+audio",
+    width: 3840,
+    height: 2160,
+    totalBytes: 3000 * 1024 * 1024,
+  });
+  const huge1080p = parser._normalizeCandidate({
+    url: "https://v3.douyinvod.com/huge1080p.mp4",
+    type: "video+audio",
+    width: 1920,
+    height: 1080,
+    totalBytes: 1500 * 1024 * 1024,
+  });
+  const allExceeded = parser._limitCandidatesBySize([huge4k, huge1080p], 1200);
+  assert.equal(allExceeded.length, 1);
+  assert.equal(allExceeded[0].url, huge1080p.url);
+
+  // 4. Bitrate & durationSec estimation when totalBytes is 0
+  const estimatedCandidate = parser._normalizeCandidate({
+    url: "https://v3.douyinvod.com/estimated.mp4",
+    type: "video+audio",
+    width: 3840,
+    height: 2160,
+    bitrate: 8_000_000,
+    totalBytes: 0,
+  });
+  const estimatedUnder = parser._limitCandidatesBySize([estimatedCandidate], 1200, 1000);
+  assert.equal(estimatedUnder.length, 1);
+  const estimatedOver = parser._limitCandidatesBySize([estimatedCandidate], 500, 1000);
+  assert.equal(estimatedOver.length, 1);
+
+  // 5. Unknown size 4K does not sneak past known within-budget 1080p
+  const unknown4k = parser._normalizeCandidate({
+    url: "https://v3.douyinvod.com/unknown4k.mp4",
+    type: "video+audio",
+    width: 3840,
+    height: 2160,
+    totalBytes: 0,
+    bitrate: 0,
+  });
+  const safeSelection = parser._limitCandidatesBySize([unknown4k, stream1080p], 1200);
+  assert.equal(safeSelection.length, 1);
+  assert.equal(safeSelection[0].url, stream1080p.url);
+});
