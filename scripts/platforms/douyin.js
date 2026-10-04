@@ -265,6 +265,8 @@ export class DouyinParser extends PlatformParser {
         author: detailMeta?.author ?? { nickname: null, uid: null, url: null },
         description: detailMeta?.description ?? null,
         coverUrl: detailMeta?.cover_url ?? null,
+        dynamicCoverUrl: detailMeta?.dynamic_cover_url ?? null,
+        suggestWords: detailMeta?.suggest_words ?? null,
         postTime: detailMeta?.post_time ?? null,
         duration: detailMeta?.duration ?? null,
         statistics: detailMeta?.statistics ?? {},
@@ -651,6 +653,8 @@ export class DouyinParser extends PlatformParser {
       },
       description: detail.desc ?? null,
       cover_url: this._extractCoverUrl(detail),
+      dynamic_cover_url: detail.video?.dynamic_cover?.url_list?.[0] ?? null,
+      suggest_words: detail.suggest_words ?? null,
       duration: (() => {
         const raw = detail.duration ?? detail.video?.duration ?? null;
         return raw != null ? Math.round(raw / 1000) : null;

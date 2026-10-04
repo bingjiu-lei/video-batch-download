@@ -100,6 +100,8 @@ function writeOutputs(parsed, transcribeResult, mp4Info, outputDir, options = {}
     title: parsed.title,
     description: parsed.description,
     cover_url: parsed.coverUrl ?? null,
+    dynamic_cover_url: parsed.dynamicCoverUrl ?? null,
+    suggest_words: parsed.suggestWords ?? null,
     author: parsed.author,
     post_time: parsed.postTime,
     duration: parsed.duration,
